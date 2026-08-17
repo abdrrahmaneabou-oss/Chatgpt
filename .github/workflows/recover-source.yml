@@ -1,0 +1,51 @@
+name: Recover PixelTrigger source
+
+on:
+  push:
+    branches:
+      - pixeltrigger-v3-input-engine
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download JADX
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 \
+            https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip \
+            -o /tmp/jadx.zip
+          unzip -q /tmp/jadx.zip -d /tmp/jadx
+          chmod +x /tmp/jadx/bin/jadx
+
+      - name: Recover source and resources
+        run: |
+          set -euxo pipefail
+          rm -rf recovered
+          mkdir -p recovered
+          /tmp/jadx/bin/jadx \
+            --show-bad-code \
+            --comments-level debug \
+            --deobf \
+            -d recovered/jadx \
+            PixelTrigger-v2.12-debug.apk
+          mkdir -p recovered/original
+          cp PixelTrigger-v2.12-debug.apk recovered/original/
+          sha256sum PixelTrigger-v2.12-debug.apk > recovered/original/SHA256SUMS.txt
+
+      - name: Upload recovered source
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixeltrigger-v2.12-jadx-source
+          path: recovered
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 7

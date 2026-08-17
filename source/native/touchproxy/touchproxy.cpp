@@ -536,7 +536,13 @@ int main(int argc, char** argv) {
                 }
             } else if (fd == tfd) {
                 uint64_t expirations{};
-                (void)read(tfd, &expirations, sizeof(expirations));
+                ssize_t timer_read;
+                do {
+                    timer_read = read(tfd, &expirations, sizeof(expirations));
+                } while (timer_read < 0 && errno == EINTR);
+                if (timer_read != static_cast<ssize_t>(sizeof(expirations))) {
+                    continue;
+                }
                 if (active_tap) {
                     const long long id = active_tap->id;
                     synthetic_up();

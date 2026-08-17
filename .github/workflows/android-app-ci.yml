@@ -6,14 +6,20 @@ on:
       - pixeltrigger-v3-input-engine
     paths:
       - 'source/app/**'
+      - 'source/native/**'
       - 'source/settings.gradle.kts'
+      - 'source/build.gradle.kts'
+      - 'source/gradle.properties'
       - '.github/workflows/android-app-ci.yml'
   pull_request:
     branches:
       - main
     paths:
       - 'source/app/**'
+      - 'source/native/**'
       - 'source/settings.gradle.kts'
+      - 'source/build.gradle.kts'
+      - 'source/gradle.properties'
       - '.github/workflows/android-app-ci.yml'
   workflow_dispatch:
 
@@ -23,7 +29,7 @@ permissions:
 jobs:
   assemble-debug:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -34,8 +40,24 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Install Android SDK 35
-        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Install Android SDK and NDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.2.12479018'
+
+      - name: Build and package privileged touchproxy assets
+        run: |
+          set -euxo pipefail
+          for ABI in arm64-v8a armeabi-v7a x86_64; do
+            BUILD_DIR="build/touchproxy-${ABI}"
+            cmake -S source/native/touchproxy -B "$BUILD_DIR" \
+              -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/27.2.12479018/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$ABI" \
+              -DANDROID_PLATFORM=29 \
+              -DCMAKE_BUILD_TYPE=Release
+            cmake --build "$BUILD_DIR" --parallel 2
+            DEST="source/app/src/main/assets/touchproxy/${ABI}"
+            mkdir -p "$DEST"
+            cp "$BUILD_DIR/touchproxy" "$DEST/touchproxy"
+          done
 
       - uses: gradle/actions/setup-gradle@v4
         with:

@@ -1,0 +1,74 @@
+name: PixelTrigger Android app CI
+
+on:
+  push:
+    branches:
+      - pixeltrigger-v3-input-engine
+    paths:
+      - 'source/app/**'
+      - 'source/native/**'
+      - 'source/settings.gradle.kts'
+      - 'source/build.gradle.kts'
+      - 'source/gradle.properties'
+      - '.github/workflows/android-app-ci.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'source/app/**'
+      - 'source/native/**'
+      - 'source/settings.gradle.kts'
+      - 'source/build.gradle.kts'
+      - 'source/gradle.properties'
+      - '.github/workflows/android-app-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  assemble-debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK and NDK
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;27.2.12479018'
+
+      - name: Build and package privileged touchproxy assets
+        run: |
+          set -euxo pipefail
+          for ABI in arm64-v8a armeabi-v7a x86_64; do
+            BUILD_DIR="build/touchproxy-${ABI}"
+            cmake -S source/native/touchproxy -B "$BUILD_DIR" \
+              -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/27.2.12479018/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$ABI" \
+              -DANDROID_PLATFORM=29 \
+              -DCMAKE_BUILD_TYPE=Release
+            cmake --build "$BUILD_DIR" --parallel 2
+            DEST="source/app/src/main/assets/touchproxy/${ABI}"
+            mkdir -p "$DEST"
+            cp "$BUILD_DIR/touchproxy" "$DEST/touchproxy"
+          done
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Assemble debug APK
+        run: gradle -p source :app:assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pixeltrigger-v3-dev-apk
+          path: source/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 7

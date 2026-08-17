@@ -1,0 +1,85 @@
+name: Recover PixelTrigger source
+
+on:
+  push:
+    branches:
+      - pixeltrigger-v3-input-engine
+    paths:
+      - PixelTrigger-v2.12-debug.apk
+      - .github/workflows/recover-source.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@v4
+        with:
+          ref: pixeltrigger-v3-input-engine
+          fetch-depth: 0
+
+      - name: Download JADX
+        run: |
+          set -euxo pipefail
+          curl -L --fail --retry 3 \
+            https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip \
+            -o /tmp/jadx.zip
+          unzip -q /tmp/jadx.zip -d /tmp/jadx
+          chmod +x /tmp/jadx/bin/jadx
+
+      - name: Recover source and resources
+        run: |
+          set -u
+          rm -rf /tmp/recovered
+          mkdir -p /tmp/recovered
+          set +e
+          /tmp/jadx/bin/jadx \
+            --show-bad-code \
+            --comments-level debug \
+            --deobf \
+            -d /tmp/recovered/jadx \
+            PixelTrigger-v2.12-debug.apk \
+            2>&1 | tee /tmp/recovered/jadx.log
+          JADX_STATUS=${PIPESTATUS[0]}
+          set -e
+
+          rm -rf recovered/v2.12
+          mkdir -p recovered/v2.12/com/pixeltrigger/app recovered/v2.12/resources
+          cp /tmp/recovered/jadx/sources/com/pixeltrigger/app/MainActivity.java recovered/v2.12/com/pixeltrigger/app/
+          cp /tmp/recovered/jadx/sources/com/pixeltrigger/app/ScreenCaptureService.java recovered/v2.12/com/pixeltrigger/app/
+          cp /tmp/recovered/jadx/sources/com/pixeltrigger/app/TriggerAccessibilityService.java recovered/v2.12/com/pixeltrigger/app/
+          cp /tmp/recovered/jadx/sources/com/pixeltrigger/app/SensorOverlayView.java recovered/v2.12/com/pixeltrigger/app/
+          cp /tmp/recovered/jadx/sources/com/pixeltrigger/app/TargetOverlayView.java recovered/v2.12/com/pixeltrigger/app/
+          cp /tmp/recovered/jadx/sources/com/pixeltrigger/app/SensorStatus.java recovered/v2.12/com/pixeltrigger/app/
+          cp /tmp/recovered/jadx/sources/com/pixeltrigger/app/DisplayCompatKt.java recovered/v2.12/com/pixeltrigger/app/
+          cp /tmp/recovered/jadx/resources/AndroidManifest.xml recovered/v2.12/resources/
+          printf '%s\n' "$JADX_STATUS" > recovered/v2.12/JADX_STATUS.txt
+          sha256sum PixelTrigger-v2.12-debug.apk > recovered/v2.12/SHA256SUMS.txt
+          cp /tmp/recovered/jadx.log recovered/v2.12/jadx.log
+
+      - name: Commit recovered app source
+        run: |
+          set -euxo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add recovered/v2.12
+          if git diff --cached --quiet; then
+            echo "Recovered source unchanged."
+          else
+            git commit -m "recovery: persist PixelTrigger v2.12 app source [skip ci]"
+            git push origin HEAD:pixeltrigger-v3-input-engine
+          fi
+
+      - name: Upload full JADX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixeltrigger-v2.12-jadx-source
+          path: /tmp/recovered
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 7

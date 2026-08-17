@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PixelTrigger</string>
+    <string name="accessibility_service_name">خدمة تنفيذ الضغطة</string>
+    <string name="accessibility_service_description">خدمة توافق لتنفيذ الضغطة عند عدم استخدام محرك اللمس المتزامن.</string>
+</resources>

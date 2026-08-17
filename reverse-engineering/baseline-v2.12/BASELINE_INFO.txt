@@ -1,0 +1,6 @@
+PixelTrigger v2.12 reverse-engineering baseline
+Generated automatically from the APK committed in this repository.
+JADX: 1.5.6
+APK SHA-256: 35d3d07465c015ed5509353463a97c2ee3732a9c835a80a5907e159d4d0e5fac
+JADX exit code: 3
+Do not edit baseline files when implementing v3; copy behavior into app/ instead.

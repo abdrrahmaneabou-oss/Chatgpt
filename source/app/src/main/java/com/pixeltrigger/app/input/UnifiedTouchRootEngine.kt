@@ -1,5 +1,7 @@
 package com.pixeltrigger.app.input
 
+import android.net.LocalSocket
+import android.net.LocalSocketAddress
 import android.os.SystemClock
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -8,10 +10,6 @@ import java.io.BufferedWriter
 import java.io.File
 import java.io.InputStreamReader
 import java.io.OutputStreamWriter
-import java.net.StandardProtocolFamily
-import java.net.UnixDomainSocketAddress
-import java.nio.channels.Channels
-import java.nio.channels.SocketChannel
 
 /**
  * True-concurrent backend for the PixelTrigger unified-touch daemon.
@@ -44,13 +42,17 @@ class UnifiedTouchRootEngine(
         }
 
         val durationUs = request.requestedDurationMs.coerceAtLeast(1L) * 1_000L
-        val address = UnixDomainSocketAddress.of(socketFile.toPath())
-
         try {
-            SocketChannel.open(StandardProtocolFamily.UNIX).use { channel ->
-                channel.connect(address)
-                val writer = BufferedWriter(OutputStreamWriter(Channels.newOutputStream(channel)))
-                val reader = BufferedReader(InputStreamReader(Channels.newInputStream(channel)))
+            LocalSocket().use { socket ->
+                socket.connect(
+                    LocalSocketAddress(
+                        socketFile.absolutePath,
+                        LocalSocketAddress.Namespace.FILESYSTEM,
+                    ),
+                )
+                socket.soTimeout = 1_000
+                val writer = BufferedWriter(OutputStreamWriter(socket.outputStream))
+                val reader = BufferedReader(InputStreamReader(socket.inputStream))
                 writer.write(
                     "TAP ${request.triggerId} ${request.x} ${request.y} " +
                         "${display.widthPx} ${display.heightPx} ${display.rotation} $durationUs\n",

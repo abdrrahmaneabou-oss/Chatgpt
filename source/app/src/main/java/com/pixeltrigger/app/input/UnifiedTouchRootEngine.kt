@@ -1,25 +1,13 @@
 package com.pixeltrigger.app.input
 
-import android.net.LocalSocket
-import android.net.LocalSocketAddress
-import android.os.SystemClock
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.io.BufferedReader
-import java.io.BufferedWriter
-import java.io.File
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
-
 /**
- * True-concurrent backend for the PixelTrigger unified-touch daemon.
+ * TapEngine facade for the privileged unified-touch daemon.
  *
- * The daemon runs as root, relays the physical touchscreen through one uinput multi-touch
- * device, and reserves one extra MT slot for PixelTrigger. This class never calls
- * AccessibilityService.dispatchGesture().
+ * Unlike the legacy Accessibility backend this never creates a competing Android gesture.
+ * The daemon adds one MT slot to the same relayed touchscreen stream as the player's fingers.
  */
 class UnifiedTouchRootEngine(
-    private val socketFile: File,
+    private val controller: RootTouchDaemonController,
     private val displayInfo: () -> DisplayInfo,
 ) : TapEngine {
     override val name: String = "root-unified-touch"
@@ -31,59 +19,20 @@ class UnifiedTouchRootEngine(
         val rotation: Int,
     )
 
-    override suspend fun tap(request: TapRequest): TapResult = withContext(Dispatchers.IO) {
-        val acceptedAt = SystemClock.elapsedRealtimeNanos()
-        val display = displayInfo()
-        if (display.widthPx <= 0 || display.heightPx <= 0) {
-            return@withContext TapResult.Rejected(request.triggerId, acceptedAt, "invalid display geometry")
-        }
-        if (!socketFile.exists()) {
-            return@withContext TapResult.Rejected(request.triggerId, acceptedAt, "unified-touch daemon unavailable")
-        }
-
-        val durationUs = request.requestedDurationMs.coerceAtLeast(1L) * 1_000L
-        try {
-            LocalSocket().use { socket ->
-                socket.connect(
-                    LocalSocketAddress(
-                        socketFile.absolutePath,
-                        LocalSocketAddress.Namespace.FILESYSTEM,
-                    ),
-                )
-                socket.soTimeout = 1_000
-                val writer = BufferedWriter(OutputStreamWriter(socket.outputStream))
-                val reader = BufferedReader(InputStreamReader(socket.inputStream))
-                writer.write(
-                    "TAP ${request.triggerId} ${request.x} ${request.y} " +
-                        "${display.widthPx} ${display.heightPx} ${display.rotation} $durationUs\n",
-                )
-                writer.flush()
-
-                when (val ack = reader.readLine() ?: "") {
-                    "ACK ${request.triggerId}" -> Unit
-                    "DUP ${request.triggerId}" -> {
-                        return@withContext TapResult.Rejected(request.triggerId, acceptedAt, "daemon duplicate guard")
-                    }
-                    else -> {
-                        return@withContext TapResult.Rejected(request.triggerId, acceptedAt, "daemon rejected: $ack")
-                    }
-                }
-
-                when (val done = reader.readLine() ?: "") {
-                    "DONE ${request.triggerId}" -> TapResult.Completed(
-                        request.triggerId,
-                        acceptedAt,
-                        SystemClock.elapsedRealtimeNanos(),
-                    )
-                    else -> TapResult.Rejected(request.triggerId, acceptedAt, "daemon completion failure: $done")
-                }
-            }
-        } catch (t: Throwable) {
-            TapResult.Rejected(
-                request.triggerId,
-                acceptedAt,
-                "unified-touch I/O: ${t.message ?: t::class.java.simpleName}",
+    override suspend fun tap(request: TapRequest): TapResult {
+        if (!controller.isAlive() && controller.start() == null) {
+            return TapResult.Rejected(
+                triggerId = request.triggerId,
+                acceptedAtNs = android.os.SystemClock.elapsedRealtimeNanos(),
+                reason = "root touch daemon unavailable",
             )
         }
+        val display = displayInfo()
+        return controller.tap(
+            request = request,
+            widthPx = display.widthPx,
+            heightPx = display.heightPx,
+            rotation = display.rotation,
+        )
     }
 }

@@ -1,5 +1,7 @@
 package com.pixeltrigger.app.input
 
+import android.os.SystemClock
+
 /**
  * TapEngine facade for the privileged unified-touch daemon.
  *
@@ -20,11 +22,13 @@ class UnifiedTouchRootEngine(
     )
 
     override suspend fun tap(request: TapRequest): TapResult {
-        if (!controller.isAlive() && controller.start() == null) {
+        // Do not start/restart the root proxy in response to a FIRE. Grabbing the physical
+        // touchscreen must happen during explicit service startup, never mid-gesture.
+        if (!controller.isAlive()) {
             return TapResult.Rejected(
                 triggerId = request.triggerId,
-                acceptedAtNs = android.os.SystemClock.elapsedRealtimeNanos(),
-                reason = "root touch daemon unavailable",
+                acceptedAtNs = SystemClock.elapsedRealtimeNanos(),
+                reason = "root touch daemon not ready",
             )
         }
         val display = displayInfo()

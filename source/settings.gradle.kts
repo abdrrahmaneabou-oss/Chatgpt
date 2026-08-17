@@ -15,4 +15,5 @@ dependencyResolutionManagement {
 }
 
 rootProject.name = "PixelTriggerReconstruction"
+include(":app")
 include(":engine-baseline-test")

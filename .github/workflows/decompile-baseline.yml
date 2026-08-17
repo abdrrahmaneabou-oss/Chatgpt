@@ -1,0 +1,92 @@
+name: Decompile PixelTrigger v2.12 baseline
+
+on:
+  push:
+    branches: [pixeltrigger-v3-shizuku]
+    paths:
+      - 'PixelTrigger-v2.12-debug.apk'
+      - '.github/workflows/decompile-baseline.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  decompile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: pixeltrigger-v3-shizuku
+
+      - name: Verify APK
+        run: |
+          test -f PixelTrigger-v2.12-debug.apk
+          sha256sum PixelTrigger-v2.12-debug.apk | tee /tmp/apk.sha256
+
+      - name: Download JADX 1.5.6
+        run: |
+          curl -fL --retry 3 -o /tmp/jadx.zip \
+            https://github.com/skylot/jadx/releases/download/v1.5.6/jadx-1.5.6.zip
+          echo '545ea2be9c242511bc145755cf4bda2485ade42966e096f8b4d3da2a230e8974  /tmp/jadx.zip' | sha256sum -c -
+          unzip -q /tmp/jadx.zip -d /tmp/jadx
+          chmod +x /tmp/jadx/bin/jadx
+
+      - name: Decompile APK
+        run: |
+          rm -rf build/jadx reverse-engineering/baseline-v2.12
+          mkdir -p build/jadx reverse-engineering/baseline-v2.12
+          set +e
+          /tmp/jadx/bin/jadx \
+            --show-bad-code \
+            --deobf \
+            --deobf-min 2 \
+            -d build/jadx \
+            PixelTrigger-v2.12-debug.apk \
+            2>&1 | tee reverse-engineering/baseline-v2.12/jadx.log
+          JADX_EXIT=${PIPESTATUS[0]}
+          set -e
+
+          mkdir -p reverse-engineering/baseline-v2.12/sources/com/pixeltrigger
+          if [ -d build/jadx/sources/com/pixeltrigger/app ]; then
+            cp -a build/jadx/sources/com/pixeltrigger/app \
+              reverse-engineering/baseline-v2.12/sources/com/pixeltrigger/
+          fi
+
+          if [ -f build/jadx/resources/AndroidManifest.xml ]; then
+            cp build/jadx/resources/AndroidManifest.xml \
+              reverse-engineering/baseline-v2.12/AndroidManifest.xml
+          fi
+
+          mkdir -p reverse-engineering/baseline-v2.12/res
+          for d in xml values layout drawable mipmap; do
+            if [ -d "build/jadx/resources/res/$d" ]; then
+              cp -a "build/jadx/resources/res/$d" \
+                "reverse-engineering/baseline-v2.12/res/$d"
+            fi
+          done
+
+          {
+            echo 'PixelTrigger v2.12 reverse-engineering baseline'
+            echo 'Generated automatically from the APK committed in this repository.'
+            echo 'JADX: 1.5.6'
+            echo -n 'APK SHA-256: '
+            cut -d' ' -f1 /tmp/apk.sha256
+            echo "JADX exit code: $JADX_EXIT"
+            echo 'Do not edit baseline files when implementing v3; copy behavior into app/ instead.'
+          } > reverse-engineering/baseline-v2.12/BASELINE_INFO.txt
+
+          test -d reverse-engineering/baseline-v2.12/sources/com/pixeltrigger/app
+
+      - name: Commit baseline source
+        run: |
+          git config user.name 'PixelTrigger Baseline Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add reverse-engineering/baseline-v2.12
+          if git diff --cached --quiet; then
+            echo 'No baseline changes.'
+            exit 0
+          fi
+          git commit -m 'baseline: decompile PixelTrigger v2.12 source [skip decompile]'
+          git push origin HEAD:pixeltrigger-v3-shizuku

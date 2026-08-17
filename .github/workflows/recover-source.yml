@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - pixeltrigger-v3-input-engine
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:

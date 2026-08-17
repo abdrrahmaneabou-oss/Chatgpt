@@ -19,7 +19,7 @@ class TriggerPipeline(
     private val scope: CoroutineScope,
     private val targetProvider: () -> Target?,
     private val telemetry: TapTelemetry = TapTelemetry(),
-    private val backendName: String,
+    private val backendNameProvider: () -> String,
 ) {
     data class Target(val x: Float, val y: Float)
 
@@ -39,22 +39,24 @@ class TriggerPipeline(
     private fun submitExactlyOnceTap() {
         val target = targetProvider() ?: return
         val request = tapCoordinator.nextRequest(target.x, target.y, durationMs = 1L)
+        val detectedBackend = backendNameProvider()
         telemetry.record(
             TapTelemetry.Entry(
                 triggerId = request.triggerId,
                 phase = TapTelemetry.Phase.DETECTED,
                 timestampNs = request.requestedAtNs,
-                backend = backendName,
+                backend = detectedBackend,
             ),
         )
 
         scope.launch {
+            val submittedBackend = backendNameProvider()
             telemetry.record(
                 TapTelemetry.Entry(
                     triggerId = request.triggerId,
                     phase = TapTelemetry.Phase.SUBMITTED,
                     timestampNs = SystemClock.elapsedRealtimeNanos(),
-                    backend = backendName,
+                    backend = submittedBackend,
                 ),
             )
 
@@ -66,7 +68,7 @@ class TriggerPipeline(
                         result.triggerId,
                         TapTelemetry.Phase.COMPLETED,
                         timestamp,
-                        backendName,
+                        submittedBackend,
                     ),
                 )
 
@@ -75,7 +77,7 @@ class TriggerPipeline(
                         result.triggerId,
                         TapTelemetry.Phase.CANCELLED,
                         timestamp,
-                        backendName,
+                        submittedBackend,
                     ),
                 )
 
@@ -84,7 +86,7 @@ class TriggerPipeline(
                         result.triggerId,
                         TapTelemetry.Phase.REJECTED,
                         timestamp,
-                        backendName,
+                        submittedBackend,
                         result.reason,
                     ),
                 )

@@ -9,6 +9,7 @@ kotlin {
 sourceSets {
     main {
         kotlin.srcDir("../app/src/main/java/com/pixeltrigger/app/engine")
+        kotlin.include("DetectionEngine.kt")
     }
 }
 

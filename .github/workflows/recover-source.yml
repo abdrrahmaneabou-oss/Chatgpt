@@ -31,18 +31,24 @@ jobs:
 
       - name: Recover source and resources
         run: |
-          set -euxo pipefail
+          set -u
           rm -rf recovered
           mkdir -p recovered
+          set +e
           /tmp/jadx/bin/jadx \
             --show-bad-code \
             --comments-level debug \
             --deobf \
             -d recovered/jadx \
-            PixelTrigger-v2.12-debug.apk
+            PixelTrigger-v2.12-debug.apk \
+            2>&1 | tee recovered/jadx.log
+          JADX_STATUS=${PIPESTATUS[0]}
+          set -e
+          echo "jadx_exit_code=${JADX_STATUS}" > recovered/JADX_STATUS.txt
           mkdir -p recovered/original
           cp PixelTrigger-v2.12-debug.apk recovered/original/
           sha256sum PixelTrigger-v2.12-debug.apk > recovered/original/SHA256SUMS.txt
+          test -d recovered/jadx/sources
 
       - name: Upload recovered source
         uses: actions/upload-artifact@v4

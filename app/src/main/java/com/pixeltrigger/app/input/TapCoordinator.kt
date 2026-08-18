@@ -3,10 +3,16 @@ package com.pixeltrigger.app.input
 import android.os.SystemClock
 import java.util.concurrent.atomic.AtomicLong
 
-/** Exactly one engine submission per detector FIRE, with monotonic IDs for diagnostics. */
+/**
+ * Converts one detector FIRE into one tap request.
+ *
+ * There is intentionally no second duplicate-rejection gate here. The detector
+ * state machine already emits one FIRE for the transition, and extra monotonic
+ * gates can incorrectly reject legitimate taps after component restarts.
+ */
 class TapCoordinator(
     private val engine: TapEngine,
-    private val gate: ExactlyOnceTapGate = ExactlyOnceTapGate(),
+    @Suppress("UNUSED_PARAMETER") private val gate: ExactlyOnceTapGate = ExactlyOnceTapGate(),
 ) {
     private val ids = AtomicLong(0L)
 
@@ -19,13 +25,6 @@ class TapCoordinator(
             requestedAtNs = SystemClock.elapsedRealtimeNanos(),
             displayId = displayId,
         )
-        if (!gate.accept(request.triggerId)) {
-            return TapResult.Rejected(
-                triggerId = request.triggerId,
-                acceptedAtNs = SystemClock.elapsedRealtimeNanos(),
-                reason = "duplicate triggerId",
-            )
-        }
         return engine.tap(request)
     }
 }

@@ -6,17 +6,15 @@ import android.os.SystemClock
 import android.view.InputDevice
 import android.view.InputEvent
 import android.view.MotionEvent
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Shizuku UserService: runs as ADB shell UID 2000. Root UID 0 is rejected by design.
+ * Shizuku UserService running as ADB shell UID 2000.
  *
- * Strict safety policy: injection is enabled only when the device reports Android's
- * multi-device-same-window input stream feature as enabled. This prevents silently falling back
- * to the legacy behavior that can cancel the player's active touch stream.
+ * Direct mode deliberately does not block injection on Android's
+ * multi-device-same-window feature flag. There is no Accessibility fallback.
+ * A detector FIRE is converted immediately to one synthetic DOWN and one UP
+ * whose event-time separation is exactly 1 ms.
  */
 class ShizukuInputUserService : IShizukuInputService.Stub {
     constructor()
@@ -26,39 +24,26 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     @Volatile private var lastDownNs = 0L
     @Volatile private var lastUpNs = 0L
     @Volatile private var detail = "not probed"
-    @Volatile private var cachedCapability = STATUS_NOT_READY
 
     private val injector: FrameworkInputInjector? by lazy { FrameworkInputInjector.create() }
 
     override fun getBackendUid(): Int = Process.myUid()
 
     override fun probeCapability(): Int {
-        val status = when {
+        return when {
             Process.myUid() != SHELL_UID -> {
-                detail = "PixelTrigger accepts Shizuku ADB/shell UID 2000 only; backend uid=${Process.myUid()}"
+                detail = "PixelTrigger requires Shizuku ADB/shell UID 2000; backend uid=${Process.myUid()}"
                 STATUS_ROOT_OR_NON_SHELL_REJECTED
             }
             injector == null -> {
                 detail = "InputManager.injectInputEvent unavailable on this build"
                 STATUS_INJECTOR_UNAVAILABLE
             }
-            else -> when (readConcurrentTouchFlag()) {
-                FlagState.ENABLED -> {
-                    detail = "enable_multi_device_same_window_stream=enabled; strict concurrent mode ready"
-                    STATUS_SAFE
-                }
-                FlagState.DISABLED -> {
-                    detail = "enable_multi_device_same_window_stream=disabled; injection blocked to protect player touch"
-                    STATUS_CONCURRENT_TOUCH_UNSAFE
-                }
-                FlagState.UNKNOWN -> {
-                    detail = "concurrent-touch feature state could not be verified; injection blocked in strict mode"
-                    STATUS_CONCURRENT_TOUCH_UNKNOWN
-                }
+            else -> {
+                detail = "Direct Shizuku InputManager ready; capability flag gate disabled"
+                STATUS_SAFE
             }
         }
-        cachedCapability = status
-        return status
     }
 
     override fun getCapabilityDetail(): String = detail
@@ -70,15 +55,13 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         requestedDurationMs: Long,
         displayId: Int,
     ): Int {
-        // Hot path: never launch `aflags` or any subprocess here. Capability is probed when the
-        // UserService connects (and explicitly when the menu refreshes), then cached. This keeps
-        // FIRE -> DOWN latency limited to Binder + InputManager injection rather than shell startup.
-        if (Process.myUid() != SHELL_UID || cachedCapability != STATUS_SAFE) return STATUS_NOT_READY
+        if (Process.myUid() != SHELL_UID) return STATUS_ROOT_OR_NON_SHELL_REJECTED
         if (triggerId <= 0L || !acceptTriggerId(triggerId)) return STATUS_DUPLICATE
         if (!x.isFinite() || !y.isFinite()) return STATUS_INVALID_ARGUMENT
 
         val inputInjector = injector ?: return STATUS_INJECTOR_UNAVAILABLE
-        // Hard invariant from the product requirement: requested contact is exactly 1 ms.
+
+        // Product invariant: the synthetic contact itself is represented as exactly 1 ms.
         @Suppress("UNUSED_VARIABLE")
         val ignoredCallerDuration = requestedDurationMs
         val downTime = SystemClock.uptimeMillis()
@@ -120,12 +103,13 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         }
 
         return try {
+            // MODE_ASYNC avoids waiting for dispatch completion on the detector hot path.
             lastDownNs = SystemClock.elapsedRealtimeNanos()
             if (!inputInjector.inject(down, MODE_ASYNC)) return STATUS_DOWN_REJECTED
 
             lastUpNs = SystemClock.elapsedRealtimeNanos()
             if (!inputInjector.inject(up, MODE_ASYNC)) {
-                // Never resend DOWN. Try only to terminate the already-started synthetic stream.
+                // Never resend DOWN. Only attempt to terminate the stream that was already started.
                 inputInjector.inject(up, MODE_WAIT_FOR_RESULT)
                 return STATUS_UP_REJECTED
             }
@@ -164,34 +148,6 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         }
     }
 
-    private fun readConcurrentTouchFlag(): FlagState {
-        val commands = listOf(
-            arrayOf("/system/bin/aflags", "list"),
-            arrayOf("aflags", "list"),
-        )
-        for (command in commands) {
-            val process = runCatching { ProcessBuilder(*command).redirectErrorStream(true).start() }.getOrNull() ?: continue
-            val lines = ArrayList<String>()
-            BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    if (line.contains(FLAG_NAME, ignoreCase = true)) lines += line
-                }
-            }
-            if (!process.waitFor(1, TimeUnit.SECONDS)) process.destroyForcibly()
-            val joined = lines.joinToString(" ").lowercase()
-            if (joined.isNotBlank()) {
-                if (Regex("(^|\\s|=|:)enabled($|\\s)").containsMatchIn(joined)) return FlagState.ENABLED
-                if (Regex("(^|\\s|=|:)disabled($|\\s)").containsMatchIn(joined)) return FlagState.DISABLED
-                if (joined.contains(" true")) return FlagState.ENABLED
-                if (joined.contains(" false")) return FlagState.DISABLED
-            }
-        }
-        return FlagState.UNKNOWN
-    }
-
-    private enum class FlagState { ENABLED, DISABLED, UNKNOWN }
-
     private class FrameworkInputInjector(
         private val instance: Any,
         private val method: java.lang.reflect.Method,
@@ -201,7 +157,6 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
 
         companion object {
             fun create(): FrameworkInputInjector? {
-                // Current Android path.
                 runCatching {
                     val clazz = Class.forName("android.hardware.input.InputManagerGlobal")
                     val instance = clazz.getDeclaredMethod("getInstance").invoke(null)
@@ -212,7 +167,6 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
                     ).apply { isAccessible = true }
                     return FrameworkInputInjector(instance, method)
                 }
-                // Compatibility path for older Android implementations.
                 runCatching {
                     val clazz = Class.forName("android.hardware.input.InputManager")
                     val instance = clazz.getDeclaredMethod("getInstance").invoke(null)
@@ -231,7 +185,6 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     companion object {
         const val SHELL_UID = 2000
         const val TAP_DURATION_MS = 1L
-        const val FLAG_NAME = "enable_multi_device_same_window_stream"
 
         const val STATUS_OK = 0
         const val STATUS_DUPLICATE = 1

@@ -3,7 +3,6 @@ package com.pixeltrigger.app.input
 import android.os.Process
 import android.os.SystemClock
 import java.lang.reflect.Method
-import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToInt
 
 /**
@@ -20,12 +19,16 @@ import kotlin.math.roundToInt
  * - action 0 = DOWN, action 2 = UP
  * - mode = 1
  * - gamepadId = -2
+ *
+ * Important: this service deliberately does NOT keep a monotonic trigger-id gate.
+ * The app process and the Shizuku UserService have independent lifetimes, so a
+ * persistent remote counter can incorrectly reject valid taps after the app side
+ * restarts its local counter.
  */
 class ShizukuInputUserService : IShizukuInputService.Stub {
     constructor()
     constructor(@Suppress("UNUSED_PARAMETER") context: android.content.Context)
 
-    private val lastTriggerId = AtomicLong(0L)
     @Volatile private var lastDownNs = 0L
     @Volatile private var lastUpNs = 0L
     @Volatile private var detail = "not probed"
@@ -65,7 +68,9 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         displayId: Int,
     ): Int {
         if (Process.myUid() != SHELL_UID) return STATUS_ROOT_OR_NON_SHELL_REJECTED
-        if (triggerId <= 0L || !acceptTriggerId(triggerId)) return STATUS_DUPLICATE
+        // triggerId is diagnostic only. Never reject a valid FIRE because counters
+        // from two independently-lived processes are not globally monotonic.
+        if (triggerId <= 0L) return STATUS_INVALID_ARGUMENT
         if (!x.isFinite() || !y.isFinite()) return STATUS_INVALID_ARGUMENT
 
         val injector = nubiaInjector ?: return STATUS_INJECTOR_UNAVAILABLE
@@ -115,14 +120,6 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
 
     override fun destroy() {
         System.exit(0)
-    }
-
-    private fun acceptTriggerId(id: Long): Boolean {
-        while (true) {
-            val previous = lastTriggerId.get()
-            if (id <= previous) return false
-            if (lastTriggerId.compareAndSet(previous, id)) return true
-        }
     }
 
     private class NubiaVirtualTouchInjector(
@@ -181,6 +178,7 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         const val VIRTUAL_GAMEPAD_ID = -2
 
         const val STATUS_OK = 0
+        // Kept for protocol compatibility with older app builds; new code never returns it.
         const val STATUS_DUPLICATE = 1
         const val STATUS_NOT_READY = 2
         const val STATUS_ROOT_OR_NON_SHELL_REJECTED = 3

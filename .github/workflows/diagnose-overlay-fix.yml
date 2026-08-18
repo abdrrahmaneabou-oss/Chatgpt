@@ -1,0 +1,65 @@
+name: Diagnose overlay fix
+
+on:
+  push:
+    branches: [pixeltrigger-v3-shizuku]
+    paths:
+      - '.github/workflows/diagnose-overlay-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: pixeltrigger-v3-shizuku
+          fetch-depth: 0
+
+      - name: Inspect exact source anchors
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import subprocess
+
+          s = Path('app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt').read_text()
+          engine = 'app/src/main/java/com/pixeltrigger/app/engine/DetectionEngine.kt'
+          blob = subprocess.check_output(['git', 'hash-object', engine], text=True).strip()
+          checks = [
+              ('engine_blob_expected', blob == '3c772ee89cee6cce107409394345bab92c47e0d6'),
+              ('monitor_source_anchor', 'sensorVisibleDiameter = max(mmToPx(DetectionEngine.SENSOR_DIAMETER_MM), 1)' in s),
+              ('sensor_clamp_anchor', 'clampPosition(sensorLp, sensor.outerDiameterPx)' in s),
+              ('target_clamp_anchor', 'clampPosition(targetLp, targetVisibleDiameter)' in s),
+              ('config_field_anchor', '    private var configMode = false\n' in s),
+              ('process_image_anchor', '        if (!engineEnabled) return\n' in s),
+              ('show_menu_anchor', 'tapEngine.refreshCapability()\n        setConfigurationTouchability(true)' in s),
+              ('attach_drag_start', '    private fun attachDrag(' in s),
+              ('toggle_engine_end', '    private fun toggleEngine()' in s),
+              ('button_visual_start', '    private fun updateButtonVisual() {' in s),
+              ('toggle_menu_end', '    private fun toggleMenu() {' in s),
+              ('position_card_anchor', 'content.addView(menuButton("إظهار / إخفاء الدوائر") { setCirclesVisible(!circlesVisible) }, matchWrap(dp(50)))' in s),
+              ('menu_drag_start', '    private fun attachMenuDrag(' in s),
+              ('close_menu_end', '    private fun closeMenu()' in s),
+              ('display_list_anchor', 'listOf(sensorView to sensorParams, targetView to targetParams, menuButton to menuButtonParams).forEach' in s),
+              ('menu_panel_after_display', '        menuPanelParams?.let' in s),
+              ('clamp_menu_anchor', '    private fun clampMenuPosition(params: WindowManager.LayoutParams) {' in s),
+              ('menu_button_anchor', '    private fun menuButton(textValue: String, action: () -> Unit): Button = Button(this).apply {' in s),
+              ('prefs_anchor', '        private const val PREFS_NAME = "pixeltrigger_prefs"\n' in s),
+          ]
+          out = ['# Overlay fix diagnostic', '', f'DetectionEngine blob: `{blob}`', '']
+          for name, ok in checks:
+              out.append(f'- {"PASS" if ok else "FAIL"}: `{name}`')
+          Path('docs/OVERLAY_FIX_DIAGNOSTIC.md').write_text('\n'.join(out) + '\n')
+          PY
+
+      - name: Publish diagnostic
+        shell: bash
+        run: |
+          git config user.name 'PixelTrigger Diagnostic Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add docs/OVERLAY_FIX_DIAGNOSTIC.md
+          git commit -m 'ci: publish overlay fix diagnostic' || true
+          git push origin HEAD:pixeltrigger-v3-shizuku

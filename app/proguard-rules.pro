@@ -1,0 +1,3 @@
+-keep class com.pixeltrigger.app.input.ShizukuInputUserService { *; }
+-keep class com.pixeltrigger.app.input.IShizukuInputService { *; }
+-keep class com.pixeltrigger.app.input.IShizukuInputService$Stub { *; }

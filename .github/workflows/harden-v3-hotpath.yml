@@ -1,0 +1,241 @@
+name: Harden PixelTrigger v3 hot path
+
+on:
+  push:
+    branches: [pixeltrigger-v3-shizuku]
+    paths:
+      - '.github/workflows/harden-v3-hotpath.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: pixeltrigger-v3-shizuku
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Apply reviewed race and latency hardening
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          service = Path('app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt')
+          s = service.read_text()
+
+          replacements = [
+          ('''    private var circlesVisible = true
+              @Volatile private var engineEnabled = true
+              private var configMode = false
+          ''','''    private var circlesVisible = true
+              @Volatile private var engineEnabled = true
+              private val engineStateLock = Any()
+              private var configMode = false
+          '''),
+          ('''    /** Called on the high-priority capture thread immediately after DetectionEngine FIRE. */
+              private fun executeTapImmediately() {
+                  val target = targetParams ?: return
+                  val tapX = target.x + targetTouchSize / 2f
+                  val tapY = target.y + targetTouchSize / 2f
+                  val result = tapCoordinator.fire(tapX, tapY, displayId = 0)
+                  if (result is TapResult.Rejected) {
+                      // Fail closed: never substitute Accessibility because that can cancel the player's touch.
+                      detectionEngine.resetForSensorMove()
+                      updateSensorStatus(SensorStatus.INPUT_NOT_READY)
+                      showMessage("تم منع الضغطة لحماية التحكم: ${result.reason}")
+                  }
+              }
+          ''','''    /** Called on the high-priority capture thread immediately after DetectionEngine FIRE. */
+              private fun executeTapImmediately() {
+                  val target = targetParams ?: return
+                  val tapX = target.x + targetTouchSize / 2f
+                  val tapY = target.y + targetTouchSize / 2f
+                  val result = synchronized(engineStateLock) {
+                      // OFF wins over a frame that was already being processed when the user double-tapped PT.
+                      if (!engineEnabled) return
+                      tapCoordinator.fire(tapX, tapY, displayId = 0)
+                  }
+                  if (result is TapResult.Rejected) {
+                      // Fail closed: never substitute Accessibility because that can cancel the player's touch.
+                      detectionEngine.resetForSensorMove()
+                      updateSensorStatus(SensorStatus.INPUT_NOT_READY)
+                      showMessage("تم منع الضغطة لحماية التحكم: ${result.reason}")
+                  }
+              }
+          '''),
+          ('''    private fun toggleEngine() {
+                  engineEnabled = !engineEnabled
+                  captureHandler?.post { detectionEngine.resetForSensorMove() }
+                  updateSensorStatus(
+                      if (!engineEnabled) SensorStatus.OFF
+                      else if (tapEngine.isReady()) SensorStatus.WAITING
+                      else SensorStatus.INPUT_NOT_READY,
+                  )
+                  updateButtonVisual()
+                  menuStatusText?.text = engineStatusText()
+              }
+          ''','''    private fun toggleEngine() {
+                  val enableRequested = synchronized(engineStateLock) {
+                      val requested = !engineEnabled
+                      // Enter OFF immediately for both transitions. Re-enable only after the capture thread
+                      // has reset all v2.12 arming state, so stale ARMED state can never fire on resume.
+                      engineEnabled = false
+                      requested
+                  }
+
+                  if (!enableRequested) {
+                      captureHandler?.post { detectionEngine.resetForSensorMove() }
+                      updateSensorStatus(SensorStatus.OFF)
+                      return
+                  }
+
+                  val restart = Runnable {
+                      detectionEngine.resetForSensorMove()
+                      synchronized(engineStateLock) { engineEnabled = true }
+                      updateSensorStatus(if (tapEngine.isReady()) SensorStatus.WAITING else SensorStatus.INPUT_NOT_READY)
+                  }
+                  captureHandler?.post(restart) ?: restart.run()
+              }
+          '''),
+          ('''        val margin = dp(10)
+                  val width = min(dp(420), max(dp(220), screenWidth - margin * 2))
+                  val height = min(dp(600), max(dp(180), screenHeight - margin * 2))
+          ''','''        val margin = dp(10)
+                  val availableWidth = max(screenWidth - margin * 2, 1)
+                  val availableHeight = max(screenHeight - margin * 2, 1)
+                  val width = min(dp(420), availableWidth).coerceAtLeast(min(dp(220), availableWidth))
+                  val height = min(dp(600), availableHeight).coerceAtLeast(min(dp(180), availableHeight))
+          '''),
+          ('''            lp.width = min(dp(420), max(dp(220), screenWidth - dp(20)))
+                      lp.height = min(dp(600), max(dp(180), screenHeight - dp(20)))
+          ''','''            val availableWidth = max(screenWidth - dp(20), 1)
+                      val availableHeight = max(screenHeight - dp(20), 1)
+                      lp.width = min(dp(420), availableWidth).coerceAtLeast(min(dp(220), availableWidth))
+                      lp.height = min(dp(600), availableHeight).coerceAtLeast(min(dp(180), availableHeight))
+          ''')]
+
+          for old, new in replacements:
+              if old not in s:
+                  raise SystemExit('ScreenCaptureService expected block not found')
+              s = s.replace(old, new, 1)
+          service.write_text(s)
+
+          input_service = Path('app/src/main/java/com/pixeltrigger/app/input/ShizukuInputUserService.kt')
+          s = input_service.read_text()
+          replacements = [
+          ('''    @Volatile private var lastDownNs = 0L
+              @Volatile private var lastUpNs = 0L
+              @Volatile private var detail = "not probed"
+
+              private val injector: FrameworkInputInjector? by lazy { FrameworkInputInjector.create() }
+          ''','''    @Volatile private var lastDownNs = 0L
+              @Volatile private var lastUpNs = 0L
+              @Volatile private var detail = "not probed"
+              @Volatile private var cachedCapability = STATUS_NOT_READY
+
+              private val injector: FrameworkInputInjector? by lazy { FrameworkInputInjector.create() }
+          '''),
+          ('''    override fun probeCapability(): Int {
+                  if (Process.myUid() != SHELL_UID) {
+                      detail = "PixelTrigger accepts Shizuku ADB/shell UID 2000 only; backend uid=${Process.myUid()}"
+                      return STATUS_ROOT_OR_NON_SHELL_REJECTED
+                  }
+                  if (injector == null) {
+                      detail = "InputManager.injectInputEvent unavailable on this build"
+                      return STATUS_INJECTOR_UNAVAILABLE
+                  }
+
+                  val flag = readConcurrentTouchFlag()
+                  return when (flag) {
+                      FlagState.ENABLED -> {
+                          detail = "enable_multi_device_same_window_stream=enabled; strict concurrent mode ready"
+                          STATUS_SAFE
+                      }
+                      FlagState.DISABLED -> {
+                          detail = "enable_multi_device_same_window_stream=disabled; injection blocked to protect player touch"
+                          STATUS_CONCURRENT_TOUCH_UNSAFE
+                      }
+                      FlagState.UNKNOWN -> {
+                          detail = "concurrent-touch feature state could not be verified; injection blocked in strict mode"
+                          STATUS_CONCURRENT_TOUCH_UNKNOWN
+                      }
+                  }
+              }
+          ''','''    override fun probeCapability(): Int {
+                  val status = when {
+                      Process.myUid() != SHELL_UID -> {
+                          detail = "PixelTrigger accepts Shizuku ADB/shell UID 2000 only; backend uid=${Process.myUid()}"
+                          STATUS_ROOT_OR_NON_SHELL_REJECTED
+                      }
+                      injector == null -> {
+                          detail = "InputManager.injectInputEvent unavailable on this build"
+                          STATUS_INJECTOR_UNAVAILABLE
+                      }
+                      else -> when (readConcurrentTouchFlag()) {
+                          FlagState.ENABLED -> {
+                              detail = "enable_multi_device_same_window_stream=enabled; strict concurrent mode ready"
+                              STATUS_SAFE
+                          }
+                          FlagState.DISABLED -> {
+                              detail = "enable_multi_device_same_window_stream=disabled; injection blocked to protect player touch"
+                              STATUS_CONCURRENT_TOUCH_UNSAFE
+                          }
+                          FlagState.UNKNOWN -> {
+                              detail = "concurrent-touch feature state could not be verified; injection blocked in strict mode"
+                              STATUS_CONCURRENT_TOUCH_UNKNOWN
+                          }
+                      }
+                  }
+                  cachedCapability = status
+                  return status
+              }
+          '''),
+          ('''    ): Int {
+                  if (probeCapability() != STATUS_SAFE) return STATUS_NOT_READY
+                  if (triggerId <= 0L || !acceptTriggerId(triggerId)) return STATUS_DUPLICATE
+          ''','''    ): Int {
+                  // Hot path: never launch `aflags` or any subprocess here. Capability is probed when the
+                  // UserService connects (and explicitly when the menu refreshes), then cached. This keeps
+                  // FIRE -> DOWN latency limited to Binder + InputManager injection rather than shell startup.
+                  if (Process.myUid() != SHELL_UID || cachedCapability != STATUS_SAFE) return STATUS_NOT_READY
+                  if (triggerId <= 0L || !acceptTriggerId(triggerId)) return STATUS_DUPLICATE
+          ''')]
+          for old, new in replacements:
+              if old not in s:
+                  raise SystemExit('ShizukuInputUserService expected block not found')
+              s = s.replace(old, new, 1)
+          input_service.write_text(s)
+
+          # Guardrail: detector source must remain untouched by this hardening job.
+          import subprocess
+          changed = subprocess.check_output(['git','diff','--name-only'], text=True).splitlines()
+          forbidden = [p for p in changed if '/engine/' in p]
+          if forbidden:
+              raise SystemExit(f'Forbidden detector modifications: {forbidden}')
+          print('\n'.join(changed))
+          PY
+
+      - name: Verify baseline tests and Android build before committing
+        run: gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug --stacktrace
+
+      - name: Commit hardening only after successful build
+        run: |
+          git config user.name 'PixelTrigger Hardening Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt \
+                  app/src/main/java/com/pixeltrigger/app/input/ShizukuInputUserService.kt
+          git commit -m 'fix: harden no-root tap hot path and engine toggle race'
+          git push origin HEAD:pixeltrigger-v3-shizuku

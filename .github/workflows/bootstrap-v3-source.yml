@@ -68,3 +68,5 @@ jobs:
       - name: Fail workflow when Android build failed
         if: steps.build.outputs.exit_code != '0'
         run: exit 1
+
+# bootstrap-trigger: 2026-08-18

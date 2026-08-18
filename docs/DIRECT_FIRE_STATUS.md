@@ -9,4 +9,4 @@
 - Accessibility fallback: none
 - Requested DOWN/UP separation: ~1 ms
 - Generic InputManager.injectInputEvent: not used
-- APK SHA-256: f4a76a6dec6b6f1539cfcb663718376621b2e28add37467b77b5f47737a479b3
+- APK SHA-256: 863e8f1a96de1fff9c7de8781102f95681d06ee627c2b6ae0273a7f1b7d21f28

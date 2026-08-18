@@ -1,0 +1,29 @@
+name: Export PixelTrigger APK for chat
+
+on:
+  push:
+    branches: [pixeltrigger-v3-shizuku]
+    paths:
+      - '.github/workflows/export-apk-chat.yml'
+
+permissions:
+  contents: read
+
+actions:
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: pixeltrigger-v3-shizuku
+      - name: Verify APK exists
+        run: test -f dist/PixelTrigger-v3-debug.apk
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixelTrigger-v3-debug-apk
+          path: dist/PixelTrigger-v3-debug.apk
+          if-no-files-found: error
+          retention-days: 1

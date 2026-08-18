@@ -17,7 +17,7 @@ class DetectionEngineBaselineTest {
         assertEquals(white, e.armedWhiteSample)
     }
 
-    @Test fun oneMeaningfulChangeFrameFires() {
+    @Test fun firstClearlyNonWhiteFrameFires() {
         val e = DetectionEngine()
         e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
         assertTrue(e.processSample(dark, 10) is DetectionEngine.Event.Fired)
@@ -25,7 +25,19 @@ class DetectionEngineBaselineTest {
         assertEquals(null, e.armedWhiteSample)
     }
 
-    @Test fun allFrozenV212ConstantsStayExact() {
+    @Test fun firstFrameBelowArmingWhiteFiresEvenWithoutOldMeaningfulChange() {
+        val e = DetectionEngine()
+        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
+
+        // RGB/luminance/chroma are unchanged and white coverage drops only 0.31.
+        // Under the old meaningfulChange logic this would NOT fire because the
+        // coverage-drop threshold was 0.35 and holding-white would still be true.
+        val justNotArmingWhite = DetectionEngine.ColorSample(240, 240, 240, 0.59f, 240, 0)
+        assertTrue(e.processSample(justNotArmingWhite, 4) is DetectionEngine.Event.Fired)
+        assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
+    }
+
+    @Test fun allFrozenV212ArmingConstantsStayExact() {
         assertEquals(195, DetectionEngine.WHITE_PIXEL_LUMINANCE)
         assertEquals(175, DetectionEngine.WHITE_PIXEL_MIN_CHANNEL)
         assertEquals(55, DetectionEngine.WHITE_PIXEL_MAX_CHROMA)

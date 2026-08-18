@@ -7,17 +7,19 @@ import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.roundToInt
 
 /**
- * Experimental REDMAGIC/Nubia virtual-touch backend running inside the Shizuku
- * UserService (ADB shell UID 2000).
+ * REDMAGIC/Nubia virtual-touch backend running inside the Shizuku UserService
+ * (ADB shell UID 2000).
  *
- * Reverse-engineered from NubiaGamepad_160 classes.dex on REDMAGIC 10S Pro:
- * - InputManager.setCameraKeyVirtualTouchEnable(boolean)
- * - InputManager.setCameraKeyVirtualTouchMode(int mode, int keyCode)
- * - InputManager.virtualTouchEvent(int keyCode, int action, int virtualType,
- *   int deviceOrPointerId, int x, int y)
+ * The detector path is unchanged. A FIRE is translated into Nubia's vendor
+ * InputManager.virtualTouchEvent() path, which reaches the InputReader/NubiaGamepad
+ * virtual-pointer implementation instead of generic injectInputEvent().
  *
- * The detector path is unchanged. A FIRE is translated directly into Nubia's
- * own virtual-touch DOWN and UP instead of generic injectInputEvent().
+ * Values were verified on REDMAGIC 10S Pro / Android 16 against the device's
+ * framework and native input libraries, then confirmed with Binder transaction 126:
+ * - keyCode = -4 (vendor virtual pointer slot)
+ * - action 0 = DOWN, action 2 = UP
+ * - mode = 1
+ * - gamepadId = -2
  */
 class ShizukuInputUserService : IShizukuInputService.Stub {
     constructor()
@@ -30,7 +32,7 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
 
     private val nubiaInjector: NubiaVirtualTouchInjector? by lazy {
         NubiaVirtualTouchInjector.create().also {
-            detail = it?.detail ?: "Nubia virtual-touch InputManager extensions unavailable"
+            detail = it?.detail ?: "Nubia InputManager.virtualTouchEvent unavailable"
         }
     }
 
@@ -43,7 +45,7 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
                 STATUS_ROOT_OR_NON_SHELL_REJECTED
             }
             nubiaInjector == null -> {
-                if (detail == "not probed") detail = "Nubia virtual-touch InputManager extensions unavailable"
+                if (detail == "not probed") detail = "Nubia InputManager.virtualTouchEvent unavailable"
                 STATUS_INJECTOR_UNAVAILABLE
             }
             else -> {
@@ -70,28 +72,41 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         @Suppress("UNUSED_VARIABLE")
         val ignoredCallerDuration = requestedDurationMs
         @Suppress("UNUSED_VARIABLE")
-        val ignoredDisplayId = displayId // Nubia CVT targets the internal game display path itself.
+        val ignoredDisplayId = displayId // Vendor input service owns internal-display coordinate translation.
+
+        val px = x.roundToInt()
+        val py = y.roundToInt()
+        var downSent = false
+        var upSent = false
 
         return try {
-            val px = x.roundToInt()
-            val py = y.roundToInt()
-
             lastDownNs = SystemClock.elapsedRealtimeNanos()
             injector.send(ACTION_DOWN, px, py)
+            downSent = true
 
-            // Keep only the synthetic contact itself alive for ~1 ms. There is no
+            // Keep only the synthetic contact alive for ~1 ms. There is no
             // pre-DOWN delay on the detector hot path.
             val upDeadlineNs = lastDownNs + TAP_DURATION_NS
             while (SystemClock.elapsedRealtimeNanos() < upDeadlineNs) {
-                // Intentional 1 ms spin: avoids Handler/sleep scheduling jitter.
+                // Intentional short spin: avoids Handler/sleep scheduling jitter.
             }
 
             lastUpNs = SystemClock.elapsedRealtimeNanos()
             injector.send(ACTION_UP, px, py)
+            upSent = true
             STATUS_OK
         } catch (t: Throwable) {
-            detail = "Nubia virtual-touch error: ${t.javaClass.simpleName}: ${t.message ?: "unknown"}"
+            detail = "Nubia InputReader virtual-touch error: ${t.javaClass.simpleName}: ${t.message ?: "unknown"}"
             STATUS_EXCEPTION
+        } finally {
+            // Never leave the vendor virtual pointer held if UP failed after a
+            // successful DOWN. A best-effort recovery UP is safer than a stuck slot.
+            if (downSent && !upSent) {
+                runCatching {
+                    lastUpNs = SystemClock.elapsedRealtimeNanos()
+                    injector.send(ACTION_UP, px, py)
+                }
+            }
         }
     }
 
@@ -99,7 +114,6 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     override fun getLastUpNs(): Long = lastUpNs
 
     override fun destroy() {
-        runCatching { nubiaInjector?.disable() }
         System.exit(0)
     }
 
@@ -113,26 +127,21 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
 
     private class NubiaVirtualTouchInjector(
         private val inputManager: Any,
-        private val enableMethod: Method,
-        private val modeMethod: Method,
         private val eventMethod: Method,
     ) {
-        val detail: String = "REDMAGIC/Nubia CameraKeyVirtualTouch ready (single mode, keyCode=$KEYCODE_FOCUS, type=$VIRTUAL_TOUCH_TYPE)"
+        val detail: String =
+            "REDMAGIC/Nubia InputReader virtual-touch ready (keyCode=$VIRTUAL_KEYCODE, mode=$VIRTUAL_TOUCH_MODE, gamepadId=$VIRTUAL_GAMEPAD_ID)"
 
         fun send(action: Int, x: Int, y: Int) {
             eventMethod.invoke(
                 inputManager,
-                KEYCODE_FOCUS,
+                VIRTUAL_KEYCODE,
                 action,
-                VIRTUAL_TOUCH_TYPE,
-                VIRTUAL_DEVICE_OR_POINTER_ID,
+                VIRTUAL_TOUCH_MODE,
+                VIRTUAL_GAMEPAD_ID,
                 x,
                 y,
             )
-        }
-
-        fun disable() {
-            enableMethod.invoke(inputManager, false)
         }
 
         companion object {
@@ -142,17 +151,6 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
                     val instance = clazz.getDeclaredMethod("getInstance")
                         .apply { isAccessible = true }
                         .invoke(null)
-
-                    val enable = clazz.getDeclaredMethod(
-                        "setCameraKeyVirtualTouchEnable",
-                        Boolean::class.javaPrimitiveType,
-                    ).apply { isAccessible = true }
-
-                    val mode = clazz.getDeclaredMethod(
-                        "setCameraKeyVirtualTouchMode",
-                        Int::class.javaPrimitiveType,
-                        Int::class.javaPrimitiveType,
-                    ).apply { isAccessible = true }
 
                     val event = clazz.getDeclaredMethod(
                         "virtualTouchEvent",
@@ -164,12 +162,7 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
                         Int::class.javaPrimitiveType,
                     ).apply { isAccessible = true }
 
-                    // Nubia's own CvtHelper enables CVT first and uses mode 0 for
-                    // CVT_SINGLE_OPT. KEYCODE_FOCUS (80) is CVT_HALF_PRESS_KEY_KEYCODE.
-                    enable.invoke(instance, true)
-                    mode.invoke(instance, CVT_SINGLE_OPT, KEYCODE_FOCUS)
-
-                    NubiaVirtualTouchInjector(instance, enable, mode, event)
+                    NubiaVirtualTouchInjector(instance, event)
                 }.getOrNull()
             }
         }
@@ -179,14 +172,13 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         const val SHELL_UID = 2000
         const val TAP_DURATION_NS = 1_000_000L
 
-        // Values recovered from NubiaGamepad_160 classes.dex (CvtHelper).
-        const val KEYCODE_FOCUS = 80
-        const val CVT_SINGLE_OPT = 0
+        // Verified REDMAGIC/Nubia InputReader virtual-touch branch.
+        const val VIRTUAL_KEYCODE = -4
         const val ACTION_DOWN = 0
         const val ACTION_MOVE = 1
         const val ACTION_UP = 2
-        const val VIRTUAL_TOUCH_TYPE = 8
-        const val VIRTUAL_DEVICE_OR_POINTER_ID = -4
+        const val VIRTUAL_TOUCH_MODE = 1
+        const val VIRTUAL_GAMEPAD_ID = -2
 
         const val STATUS_OK = 0
         const val STATUS_DUPLICATE = 1

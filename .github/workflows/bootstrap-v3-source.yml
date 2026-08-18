@@ -84,3 +84,5 @@ jobs:
       - name: Fail workflow when build failed
         if: steps.build.outputs.exit_code != '0'
         run: exit 1
+
+# manual-verification-trigger: hardened-hotpath-2026-08-18

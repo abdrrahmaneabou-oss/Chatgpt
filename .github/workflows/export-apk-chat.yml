@@ -17,13 +17,15 @@ jobs:
         with:
           ref: pixeltrigger-v3-shizuku
           fetch-depth: 0
-      - name: Verify APK exists
-        run: test -f dist/PixelTrigger-v3-debug.apk
+      - name: Verify latest direct-fire APK exists
+        run: |
+          test -f dist/PixelTrigger-v3-direct-1ms-debug.apk
+          sha256sum dist/PixelTrigger-v3-direct-1ms-debug.apk
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: PixelTrigger-v3-debug-apk
-          path: dist/PixelTrigger-v3-debug.apk
+          name: PixelTrigger-v3-direct-1ms-debug-apk
+          path: dist/PixelTrigger-v3-direct-1ms-debug.apk
           if-no-files-found: error
           retention-days: 1
       - name: Publish workflow run id
@@ -33,5 +35,5 @@ jobs:
           git config user.name 'PixelTrigger Export Bot'
           git config user.email 'actions@users.noreply.github.com'
           git add docs/APK_EXPORT_RUN_ID.txt
-          git commit -m 'ci: record APK export run id' || true
+          git commit -m 'ci: record direct-fire APK export run id' || true
           git push origin HEAD:pixeltrigger-v3-shizuku

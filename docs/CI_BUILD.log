@@ -43,49 +43,50 @@ to this project's gradle.properties.
 > Task :app:processDebugMainManifest
 > Task :app:processDebugManifest
 > Task :app:preDebugUnitTestBuild UP-TO-DATE
-> Task :app:processDebugManifestForPackage
-> Task :app:javaPreCompileDebugUnitTest
 > Task :app:javaPreCompileDebug
+> Task :app:javaPreCompileDebugUnitTest
 > Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
 > Task :app:mergeDebugShaders
 > Task :app:compileDebugShaders NO-SOURCE
 > Task :app:generateDebugAssets UP-TO-DATE
 > Task :app:mergeDebugAssets
+> Task :app:processDebugManifestForPackage
 > Task :app:compressDebugAssets
 > Task :app:desugarDebugFileDependencies
-> Task :app:processDebugResources
-> Task :app:checkDebugDuplicateClasses
 > Task :app:mergeDebugStartupProfile
 > Task :app:mergeDebugJniLibFolders
+> Task :app:checkDebugDuplicateClasses
+> Task :app:processDebugResources
 > Task :app:mergeDebugNativeLibs NO-SOURCE
-> Task :app:mergeLibDexDebug
+> Task :app:compileDebugKotlin
 > Task :app:stripDebugDebugSymbols NO-SOURCE
+> Task :app:mergeLibDexDebug
+> Task :app:mergeExtDexDebug
 > Task :app:validateSigningDebug
 > Task :app:writeDebugAppMetadata
 > Task :app:writeDebugSigningConfigVersions
-> Task :app:mergeExtDexDebug
 
 > Task :app:compileDebugKotlin
-w: file:///home/runner/work/Chatgpt/Chatgpt/app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt:209:19 Variable 'event' is never used
+w: file:///home/runner/work/Chatgpt/Chatgpt/app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt:210:19 Variable 'event' is never used
 w: file:///home/runner/work/Chatgpt/Chatgpt/app/src/main/java/com/pixeltrigger/app/input/ShizukuInputUserService.kt:213:51 Type mismatch: inferred type is Any? but Any was expected
 w: file:///home/runner/work/Chatgpt/Chatgpt/app/src/main/java/com/pixeltrigger/app/input/ShizukuInputUserService.kt:224:51 Type mismatch: inferred type is Any? but Any was expected
 
 > Task :app:compileDebugJavaWithJavac
+> Task :app:bundleDebugClassesToCompileJar
 > Task :app:bundleDebugClassesToRuntimeJar
 > Task :app:processDebugJavaRes
-> Task :app:bundleDebugClassesToCompileJar
 > Task :app:dexBuilderDebug
 > Task :app:mergeDebugGlobalSynthetics
 > Task :app:compileDebugUnitTestKotlin
 > Task :app:compileDebugUnitTestJavaWithJavac NO-SOURCE
 > Task :app:processDebugUnitTestJavaRes
-> Task :app:mergeProjectDexDebug
 > Task :app:mergeDebugJavaResource
 > Task :app:testDebugUnitTest
+> Task :app:mergeProjectDexDebug
 > Task :app:packageDebug
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1787012274773.json
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1787013840153.json
 
-BUILD SUCCESSFUL in 1m 13s
+BUILD SUCCESSFUL in 1m 48s
 44 actionable tasks: 41 executed, 3 up-to-date

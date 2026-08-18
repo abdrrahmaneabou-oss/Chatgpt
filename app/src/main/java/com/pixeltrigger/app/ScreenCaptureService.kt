@@ -84,6 +84,7 @@ class ScreenCaptureService : Service() {
     @Volatile private var engineEnabled = true
     private val engineStateLock = Any()
     private var configMode = false
+    @Volatile private var circleEditMode = false
     private var lastInputReady = false
 
     private val detectionEngine = DetectionEngine()
@@ -180,7 +181,7 @@ class ScreenCaptureService : Service() {
         }
 
     private fun processImage(image: Image) {
-        if (!engineEnabled) return
+        if (!engineEnabled || circleEditMode) return
 
         val inputReady = tapEngine.isReady()
         if (inputReady != lastInputReady) {
@@ -239,7 +240,7 @@ class ScreenCaptureService : Service() {
 
     private fun createOverlays() {
         if (sensorView != null) return
-        sensorVisibleDiameter = max(mmToPx(DetectionEngine.SENSOR_DIAMETER_MM), 1)
+        sensorVisibleDiameter = max(mmToPx(MONITOR_DIAMETER_MM), 1)
         val targetVisibleDiameter = max(mmToPx(5f), dp(12))
 
         val sensor = SensorOverlayView(this, sensorVisibleDiameter)
@@ -250,7 +251,7 @@ class ScreenCaptureService : Service() {
             y = preferences.getInt(KEY_SENSOR_Y, screenHeight / 2 - sensorTouchSize / 2)
         }
         sensorParams = sensorLp
-        clampPosition(sensorLp, sensor.outerDiameterPx)
+        clampCirclePosition(sensorLp, sensorVisibleDiameter)
         windowManager.addView(sensor, sensorLp)
         attachDrag(sensor, sensorLp, sensor.outerDiameterPx) { x, y ->
             detectionEngine.resetForSensorMove()
@@ -265,7 +266,7 @@ class ScreenCaptureService : Service() {
             y = preferences.getInt(KEY_TARGET_Y, screenHeight / 2 - targetTouchSize / 2)
         }
         targetParams = targetLp
-        clampPosition(targetLp, targetVisibleDiameter)
+        clampCirclePosition(targetLp, targetVisibleDiameter)
         windowManager.addView(target, targetLp)
         attachDrag(target, targetLp, targetVisibleDiameter) { x, y ->
             preferences.edit().putInt(KEY_TARGET_X, x).putInt(KEY_TARGET_Y, y).apply()
@@ -317,11 +318,11 @@ class ScreenCaptureService : Service() {
                 return true
             }
             override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                toggleMenu()
+                if (circleEditMode) finishCirclePositionEditing() else toggleMenu()
                 return true
             }
             override fun onDoubleTap(e: MotionEvent): Boolean {
-                toggleEngine()
+                if (circleEditMode) finishCirclePositionEditing() else toggleEngine()
                 return true
             }
         })
@@ -334,33 +335,60 @@ class ScreenCaptureService : Service() {
         visibleDiameter: Int,
         onMoved: (Int, Int) -> Unit,
     ) {
-        var downX = 0f
-        var downY = 0f
-        var startX = 0
-        var startY = 0
+        var grabOffsetX = 0f
+        var grabOffsetY = 0f
+        var framePending = false
+
+        fun updateNextFrame() {
+            if (framePending) return
+            framePending = true
+            view.postOnAnimation {
+                framePending = false
+                runCatching { windowManager.updateViewLayout(view, params) }
+            }
+        }
+
         view.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    downX = event.rawX
-                    downY = event.rawY
-                    startX = params.x
-                    startY = params.y
+                    grabOffsetX = event.rawX - params.x
+                    grabOffsetY = event.rawY - params.y
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    params.x = startX + (event.rawX - downX).roundToInt()
-                    params.y = startY + (event.rawY - downY).roundToInt()
-                    clampPosition(params, visibleDiameter)
-                    windowManager.updateViewLayout(view, params)
+                    params.x = (event.rawX - grabOffsetX).roundToInt()
+                    params.y = (event.rawY - grabOffsetY).roundToInt()
+                    clampCirclePosition(params, visibleDiameter)
+                    updateNextFrame()
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    clampCirclePosition(params, visibleDiameter)
+                    runCatching { windowManager.updateViewLayout(view, params) }
                     onMoved(params.x, params.y)
                     true
                 }
                 else -> true
             }
         }
+    }
+
+    private fun beginCirclePositionEditing() {
+        closeMenu()
+        circleEditMode = true
+        setCirclesVisible(true)
+        setConfigurationTouchability(true)
+        updateButtonVisual()
+        showMessage("اسحب الدائرتين إلى الموضع المطلوب، ثم اضغط ✓ للحفظ")
+    }
+
+    private fun finishCirclePositionEditing() {
+        if (!circleEditMode) return
+        circleEditMode = false
+        setConfigurationTouchability(false)
+        captureHandler?.post { detectionEngine.resetForSensorMove() }
+        updateButtonVisual()
+        showMessage("تم حفظ مواضع الدوائر")
     }
 
     private fun toggleEngine() {
@@ -389,13 +417,18 @@ class ScreenCaptureService : Service() {
     private fun updateButtonVisual() {
         val button = menuButton ?: return
         val fill = when {
+            circleEditMode -> Color.rgb(30, 165, 92)
             !engineEnabled -> Color.rgb(95, 95, 104)
             tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> Color.rgb(165, 70, 190)
             detectionEngine.state == DetectionEngine.State.ARMED -> Color.rgb(32, 170, 88)
             else -> Color.rgb(91, 54, 221)
         }
-        button.text = if (engineEnabled) "PT" else "OFF"
-        button.textSize = if (engineEnabled) 15f else 10f
+        button.text = when {
+            circleEditMode -> "✓"
+            engineEnabled -> "PT"
+            else -> "OFF"
+        }
+        button.textSize = if (circleEditMode || engineEnabled) 15f else 10f
         button.background = roundedBackground(fill, Color.argb(210, 220, 220, 255), 18f)
     }
 
@@ -406,7 +439,7 @@ class ScreenCaptureService : Service() {
     private fun showMenu() {
         if (menuPanel != null) return
         tapEngine.refreshCapability()
-        setConfigurationTouchability(true)
+        setConfigurationTouchability(false)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -443,6 +476,13 @@ class ScreenCaptureService : Service() {
             setPadding(dp(5), 0, dp(5), dp(8))
         }, matchWrap())
 
+        content.addView(
+            actionCard(
+                "تعديل مواضع الدوائر",
+                "اسحب دائرة المراقبة ودائرة الضغط لأي موضع على الشاشة، ثم اضغط ✓ للحفظ.",
+            ) { beginCirclePositionEditing() },
+            matchWrap(dp(88)),
+        )
         content.addView(menuButton("إظهار / إخفاء الدوائر") { setCirclesVisible(!circlesVisible) }, matchWrap(dp(50)))
 
         val whiteSwitch = Switch(this).apply {
@@ -529,23 +569,36 @@ class ScreenCaptureService : Service() {
     }
 
     private fun attachMenuDrag(handle: View, panel: View, params: WindowManager.LayoutParams) {
-        var downX = 0f
-        var downY = 0f
-        var startX = 0
-        var startY = 0
+        var grabOffsetX = 0f
+        var grabOffsetY = 0f
+        var framePending = false
+
+        fun updateNextFrame() {
+            if (framePending) return
+            framePending = true
+            panel.postOnAnimation {
+                framePending = false
+                if (menuPanel === panel) runCatching { windowManager.updateViewLayout(panel, params) }
+            }
+        }
+
         handle.setOnTouchListener { _, event ->
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    downX = event.rawX; downY = event.rawY; startX = params.x; startY = params.y; true
+                    grabOffsetX = event.rawX - params.x
+                    grabOffsetY = event.rawY - params.y
+                    true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    params.x = startX + (event.rawX - downX).roundToInt()
-                    params.y = startY + (event.rawY - downY).roundToInt()
+                    params.x = (event.rawX - grabOffsetX).roundToInt()
+                    params.y = (event.rawY - grabOffsetY).roundToInt()
                     clampMenuPosition(params)
-                    windowManager.updateViewLayout(panel, params)
+                    updateNextFrame()
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    clampMenuPosition(params)
+                    runCatching { windowManager.updateViewLayout(panel, params) }
                     preferences.edit().putInt(KEY_MENU_X, params.x).putInt(KEY_MENU_Y, params.y).apply()
                     true
                 }
@@ -603,11 +656,18 @@ class ScreenCaptureService : Service() {
             old?.close()
             detectionEngine.resetForSensorMove()
         }
-        listOf(sensorView to sensorParams, targetView to targetParams, menuButton to menuButtonParams).forEach { (view, lp) ->
-            if (view != null && lp != null) {
-                clampPosition(lp, min(lp.width, lp.height))
-                runCatching { windowManager.updateViewLayout(view, lp) }
-            }
+        sensorParams?.let { lp ->
+            clampCirclePosition(lp, sensorVisibleDiameter)
+            sensorView?.let { runCatching { windowManager.updateViewLayout(it, lp) } }
+        }
+        targetParams?.let { lp ->
+            val visibleDiameter = max(mmToPx(5f), dp(12))
+            clampCirclePosition(lp, visibleDiameter)
+            targetView?.let { runCatching { windowManager.updateViewLayout(it, lp) } }
+        }
+        menuButtonParams?.let { lp ->
+            clampPosition(lp, min(lp.width, lp.height))
+            menuButton?.let { runCatching { windowManager.updateViewLayout(it, lp) } }
         }
         menuPanelParams?.let { lp ->
             val panel = menuPanel ?: return@let
@@ -635,6 +695,16 @@ class ScreenCaptureService : Service() {
         params.y = params.y.coerceIn(0, max(screenHeight - h, 0))
     }
 
+    private fun clampCirclePosition(params: WindowManager.LayoutParams, visibleDiameter: Int) {
+        val halfWindowW = max(params.width, 1) / 2f
+        val halfWindowH = max(params.height, 1) / 2f
+        val radius = max(visibleDiameter, 1) / 2f
+        val centerX = (params.x + halfWindowW).coerceIn(radius, max(screenWidth - radius, radius))
+        val centerY = (params.y + halfWindowH).coerceIn(radius, max(screenHeight - radius, radius))
+        params.x = (centerX - halfWindowW).roundToInt()
+        params.y = (centerY - halfWindowH).roundToInt()
+    }
+
     private fun clampMenuPosition(params: WindowManager.LayoutParams) {
         params.x = params.x.coerceIn(0, max(screenWidth - params.width, 0))
         params.y = params.y.coerceIn(0, max(screenHeight - params.height, 0))
@@ -650,6 +720,27 @@ class ScreenCaptureService : Service() {
 
     private fun baseOverlayFlags(): Int =
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+
+    private fun actionCard(title: String, subtitle: String, action: () -> Unit): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            background = roundedBackground(Color.rgb(232, 247, 239), Color.rgb(64, 166, 105), 14f)
+            isClickable = true
+            isFocusable = true
+            addView(TextView(this@ScreenCaptureService).apply {
+                text = title
+                textSize = 16f
+                setTextColor(Color.rgb(20, 95, 55))
+            }, matchWrap())
+            addView(TextView(this@ScreenCaptureService).apply {
+                text = subtitle
+                textSize = 12f
+                setTextColor(Color.rgb(55, 75, 64))
+            }, matchWrap())
+            setOnClickListener { action() }
+        }
 
     private fun menuButton(textValue: String, action: () -> Unit): Button = Button(this).apply {
         text = textValue
@@ -726,6 +817,7 @@ class ScreenCaptureService : Service() {
         private const val CHANNEL_ID = "pixeltrigger_monitor"
         private const val NOTIFICATION_ID = 41
         private const val PREFS_NAME = "pixeltrigger_prefs"
+        private const val MONITOR_DIAMETER_MM = 0.5f
         private const val KEY_SENSOR_X = "sensor_x"
         private const val KEY_SENSOR_Y = "sensor_y"
         private const val KEY_TARGET_X = "target_x"

@@ -1,10 +1,11 @@
 package com.pixeltrigger.app.engine
 
 /**
- * Clean transcription of the PixelTrigger v2.12 trigger state machine recovered from the APK.
+ * PixelTrigger v2.12 arming/rearming baseline with the v3 direct-fire rule.
  *
- * IMPORTANT: this class is a behavioral baseline. Input/tap delivery must be changed elsewhere.
- * Any threshold or transition change here requires an explicit baseline update.
+ * Arming thresholds and required arming frames remain unchanged from v2.12.
+ * Once ARMED, the first captured frame that no longer satisfies isArmingWhite()
+ * fires immediately. Input/tap delivery is handled elsewhere.
  */
 class DetectionEngine(
     var whiteRearmEnabled: Boolean = true,
@@ -71,9 +72,7 @@ class DetectionEngine(
     private var manualRearmWhiteFrames: Int = 0
 
     /**
-     * Mirrors v2.12 image processing order:
-     * 1) process one-time delay override; 2) if it armed on this sample, do not process the
-     * normal state machine again for the same sample.
+     * Mirrors v2.12 rearm-override processing order, then applies the direct-fire rule.
      */
     fun processSample(sample: ColorSample, nowMs: Long): Event {
         val manualEvent = processOneTimeRearmOverride(sample, nowMs)
@@ -83,7 +82,6 @@ class DetectionEngine(
         return updateTriggerState(sample, nowMs)
     }
 
-    /** Request the exact v2.12 one-time timed-rearm bypass. */
     fun requestOneTimeRearmOverride(nowMs: Long): Boolean {
         if (!whiteRearmEnabled || !rearmDelayEnabled || state != State.WAITING_REARM) return false
         manualRearmRequestedAtMs = nowMs
@@ -132,18 +130,13 @@ class DetectionEngine(
         }
 
         State.ARMED -> {
-            val reference = armedWhiteSample
-            val meaningfulChange = reference != null && sample.isMeaningfulChangeFrom(reference)
-            val stillWhite = sample.isHoldingWhite() && !meaningfulChange
-            if (stillWhite) {
-                changedFrames = 0
-                Event.None
+            // No holding-white threshold, meaningful-change threshold, debounce, or delay here.
+            // The first frame that is not arming-white fires immediately.
+            if (!sample.isArmingWhite()) {
+                fire(nowMs)
+                Event.Fired(nowMs)
             } else {
-                changedFrames = if (meaningfulChange) changedFrames + 1 else 0
-                if (changedFrames >= REQUIRED_CHANGE_FRAMES) {
-                    fire(nowMs)
-                    Event.Fired(nowMs)
-                } else Event.None
+                Event.None
             }
         }
 

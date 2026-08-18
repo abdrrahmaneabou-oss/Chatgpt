@@ -1,31 +1,38 @@
 package com.pixeltrigger.app.input
 
-import android.content.Context
 import android.os.Process
 import android.os.SystemClock
-import android.view.InputDevice
-import android.view.InputEvent
-import android.view.MotionEvent
+import java.lang.reflect.Method
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.roundToInt
 
 /**
- * Shizuku UserService running as ADB shell UID 2000.
+ * Experimental REDMAGIC/Nubia virtual-touch backend running inside the Shizuku
+ * UserService (ADB shell UID 2000).
  *
- * Direct mode deliberately does not block injection on Android's
- * multi-device-same-window feature flag. There is no Accessibility fallback.
- * A detector FIRE is converted immediately to one synthetic DOWN and one UP
- * whose event-time separation is exactly 1 ms.
+ * Reverse-engineered from NubiaGamepad_160 classes.dex on REDMAGIC 10S Pro:
+ * - InputManager.setCameraKeyVirtualTouchEnable(boolean)
+ * - InputManager.setCameraKeyVirtualTouchMode(int mode, int keyCode)
+ * - InputManager.virtualTouchEvent(int keyCode, int action, int virtualType,
+ *   int deviceOrPointerId, int x, int y)
+ *
+ * The detector path is unchanged. A FIRE is translated directly into Nubia's
+ * own virtual-touch DOWN and UP instead of generic injectInputEvent().
  */
 class ShizukuInputUserService : IShizukuInputService.Stub {
     constructor()
-    constructor(@Suppress("UNUSED_PARAMETER") context: Context)
+    constructor(@Suppress("UNUSED_PARAMETER") context: android.content.Context)
 
     private val lastTriggerId = AtomicLong(0L)
     @Volatile private var lastDownNs = 0L
     @Volatile private var lastUpNs = 0L
     @Volatile private var detail = "not probed"
 
-    private val injector: FrameworkInputInjector? by lazy { FrameworkInputInjector.create() }
+    private val nubiaInjector: NubiaVirtualTouchInjector? by lazy {
+        NubiaVirtualTouchInjector.create().also {
+            detail = it?.detail ?: "Nubia virtual-touch InputManager extensions unavailable"
+        }
+    }
 
     override fun getBackendUid(): Int = Process.myUid()
 
@@ -35,12 +42,12 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
                 detail = "PixelTrigger requires Shizuku ADB/shell UID 2000; backend uid=${Process.myUid()}"
                 STATUS_ROOT_OR_NON_SHELL_REJECTED
             }
-            injector == null -> {
-                detail = "InputManager.injectInputEvent unavailable on this build"
+            nubiaInjector == null -> {
+                if (detail == "not probed") detail = "Nubia virtual-touch InputManager extensions unavailable"
                 STATUS_INJECTOR_UNAVAILABLE
             }
             else -> {
-                detail = "Direct Shizuku InputManager ready; capability flag gate disabled"
+                detail = nubiaInjector!!.detail
                 STATUS_SAFE
             }
         }
@@ -59,67 +66,32 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         if (triggerId <= 0L || !acceptTriggerId(triggerId)) return STATUS_DUPLICATE
         if (!x.isFinite() || !y.isFinite()) return STATUS_INVALID_ARGUMENT
 
-        val inputInjector = injector ?: return STATUS_INJECTOR_UNAVAILABLE
-
-        // Product invariant: the synthetic contact itself is represented as exactly 1 ms.
+        val injector = nubiaInjector ?: return STATUS_INJECTOR_UNAVAILABLE
         @Suppress("UNUSED_VARIABLE")
         val ignoredCallerDuration = requestedDurationMs
-        val downTime = SystemClock.uptimeMillis()
-        val upTime = downTime + TAP_DURATION_MS
-
-        val down = MotionEvent.obtain(
-            downTime,
-            downTime,
-            MotionEvent.ACTION_DOWN,
-            x,
-            y,
-            1.0f,
-            1.0f,
-            0,
-            1.0f,
-            1.0f,
-            0,
-            0,
-        ).apply {
-            source = InputDevice.SOURCE_TOUCHSCREEN
-            setDisplayIdCompat(displayId)
-        }
-        val up = MotionEvent.obtain(
-            downTime,
-            upTime,
-            MotionEvent.ACTION_UP,
-            x,
-            y,
-            0.0f,
-            1.0f,
-            0,
-            1.0f,
-            1.0f,
-            0,
-            0,
-        ).apply {
-            source = InputDevice.SOURCE_TOUCHSCREEN
-            setDisplayIdCompat(displayId)
-        }
+        @Suppress("UNUSED_VARIABLE")
+        val ignoredDisplayId = displayId // Nubia CVT targets the internal game display path itself.
 
         return try {
-            // MODE_ASYNC avoids waiting for dispatch completion on the detector hot path.
+            val px = x.roundToInt()
+            val py = y.roundToInt()
+
             lastDownNs = SystemClock.elapsedRealtimeNanos()
-            if (!inputInjector.inject(down, MODE_ASYNC)) return STATUS_DOWN_REJECTED
+            injector.send(ACTION_DOWN, px, py)
+
+            // Keep only the synthetic contact itself alive for ~1 ms. There is no
+            // pre-DOWN delay on the detector hot path.
+            val upDeadlineNs = lastDownNs + TAP_DURATION_NS
+            while (SystemClock.elapsedRealtimeNanos() < upDeadlineNs) {
+                // Intentional 1 ms spin: avoids Handler/sleep scheduling jitter.
+            }
 
             lastUpNs = SystemClock.elapsedRealtimeNanos()
-            if (!inputInjector.inject(up, MODE_ASYNC)) {
-                // Never resend DOWN. Only attempt to terminate the stream that was already started.
-                inputInjector.inject(up, MODE_WAIT_FOR_RESULT)
-                return STATUS_UP_REJECTED
-            }
+            injector.send(ACTION_UP, px, py)
             STATUS_OK
         } catch (t: Throwable) {
-            detail = "injection error: ${t.javaClass.simpleName}: ${t.message ?: "unknown"}"
+            detail = "Nubia virtual-touch error: ${t.javaClass.simpleName}: ${t.message ?: "unknown"}"
             STATUS_EXCEPTION
-        } finally {
-            down.recycle()
-            up.recycle()
         }
     }
 
@@ -127,6 +99,7 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     override fun getLastUpNs(): Long = lastUpNs
 
     override fun destroy() {
+        runCatching { nubiaInjector?.disable() }
         System.exit(0)
     }
 
@@ -138,53 +111,82 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         }
     }
 
-    private fun MotionEvent.setDisplayIdCompat(displayId: Int) {
-        if (displayId < 0) return
-        runCatching {
-            InputEvent::class.java
-                .getDeclaredMethod("setDisplayId", Int::class.javaPrimitiveType)
-                .apply { isAccessible = true }
-                .invoke(this, displayId)
-        }
-    }
-
-    private class FrameworkInputInjector(
-        private val instance: Any,
-        private val method: java.lang.reflect.Method,
+    private class NubiaVirtualTouchInjector(
+        private val inputManager: Any,
+        private val enableMethod: Method,
+        private val modeMethod: Method,
+        private val eventMethod: Method,
     ) {
-        fun inject(event: InputEvent, mode: Int): Boolean =
-            (method.invoke(instance, event, mode) as? Boolean) == true
+        val detail: String = "REDMAGIC/Nubia CameraKeyVirtualTouch ready (single mode, keyCode=$KEYCODE_FOCUS, type=$VIRTUAL_TOUCH_TYPE)"
+
+        fun send(action: Int, x: Int, y: Int) {
+            eventMethod.invoke(
+                inputManager,
+                KEYCODE_FOCUS,
+                action,
+                VIRTUAL_TOUCH_TYPE,
+                VIRTUAL_DEVICE_OR_POINTER_ID,
+                x,
+                y,
+            )
+        }
+
+        fun disable() {
+            enableMethod.invoke(inputManager, false)
+        }
 
         companion object {
-            fun create(): FrameworkInputInjector? {
-                runCatching {
-                    val clazz = Class.forName("android.hardware.input.InputManagerGlobal")
-                    val instance = clazz.getDeclaredMethod("getInstance").invoke(null)
-                    val method = clazz.getDeclaredMethod(
-                        "injectInputEvent",
-                        InputEvent::class.java,
-                        Int::class.javaPrimitiveType,
-                    ).apply { isAccessible = true }
-                    return FrameworkInputInjector(instance, method)
-                }
-                runCatching {
+            fun create(): NubiaVirtualTouchInjector? {
+                return runCatching {
                     val clazz = Class.forName("android.hardware.input.InputManager")
-                    val instance = clazz.getDeclaredMethod("getInstance").invoke(null)
-                    val method = clazz.getDeclaredMethod(
-                        "injectInputEvent",
-                        InputEvent::class.java,
+                    val instance = clazz.getDeclaredMethod("getInstance")
+                        .apply { isAccessible = true }
+                        .invoke(null)
+
+                    val enable = clazz.getDeclaredMethod(
+                        "setCameraKeyVirtualTouchEnable",
+                        Boolean::class.javaPrimitiveType,
+                    ).apply { isAccessible = true }
+
+                    val mode = clazz.getDeclaredMethod(
+                        "setCameraKeyVirtualTouchMode",
+                        Int::class.javaPrimitiveType,
                         Int::class.javaPrimitiveType,
                     ).apply { isAccessible = true }
-                    return FrameworkInputInjector(instance, method)
-                }
-                return null
+
+                    val event = clazz.getDeclaredMethod(
+                        "virtualTouchEvent",
+                        Int::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType,
+                        Int::class.javaPrimitiveType,
+                    ).apply { isAccessible = true }
+
+                    // Nubia's own CvtHelper enables CVT first and uses mode 0 for
+                    // CVT_SINGLE_OPT. KEYCODE_FOCUS (80) is CVT_HALF_PRESS_KEY_KEYCODE.
+                    enable.invoke(instance, true)
+                    mode.invoke(instance, CVT_SINGLE_OPT, KEYCODE_FOCUS)
+
+                    NubiaVirtualTouchInjector(instance, enable, mode, event)
+                }.getOrNull()
             }
         }
     }
 
     companion object {
         const val SHELL_UID = 2000
-        const val TAP_DURATION_MS = 1L
+        const val TAP_DURATION_NS = 1_000_000L
+
+        // Values recovered from NubiaGamepad_160 classes.dex (CvtHelper).
+        const val KEYCODE_FOCUS = 80
+        const val CVT_SINGLE_OPT = 0
+        const val ACTION_DOWN = 0
+        const val ACTION_MOVE = 1
+        const val ACTION_UP = 2
+        const val VIRTUAL_TOUCH_TYPE = 8
+        const val VIRTUAL_DEVICE_OR_POINTER_ID = -4
 
         const val STATUS_OK = 0
         const val STATUS_DUPLICATE = 1
@@ -198,8 +200,5 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         const val STATUS_UP_REJECTED = 9
         const val STATUS_EXCEPTION = 10
         const val STATUS_SAFE = 100
-
-        const val MODE_ASYNC = 0
-        const val MODE_WAIT_FOR_RESULT = 1
     }
 }

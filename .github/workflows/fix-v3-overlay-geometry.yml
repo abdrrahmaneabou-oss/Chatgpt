@@ -1,0 +1,543 @@
+name: Fix PixelTrigger v3 overlay geometry
+
+on:
+  push:
+    branches: [pixeltrigger-v3-shizuku]
+    paths:
+      - '.github/workflows/fix-v3-overlay-geometry.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: pixeltrigger-v3-shizuku
+          fetch-depth: 0
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Apply exact 0.5 mm sensor and smooth positioning fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          ENGINE='app/src/main/java/com/pixeltrigger/app/engine/DetectionEngine.kt'
+          ENGINE_SHA_BEFORE="$(sha256sum "$ENGINE" | cut -d' ' -f1)"
+          export ENGINE_SHA_BEFORE
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          service_path = Path('app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt')
+          s = service_path.read_text()
+
+          def replace_once(name, old, new):
+              global s
+              if old not in s:
+                  raise SystemExit(f'Expected block not found: {name}')
+              s = s.replace(old, new, 1)
+
+          replace_once(
+              'sensor diameter source',
+              'sensorVisibleDiameter = max(mmToPx(DetectionEngine.SENSOR_DIAMETER_MM), 1)',
+              'sensorVisibleDiameter = max(mmToPx(MONITOR_DIAMETER_MM), 1)',
+          )
+
+          replace_once(
+              'sensor initial clamp',
+              'clampPosition(sensorLp, sensor.outerDiameterPx)',
+              'clampCirclePosition(sensorLp, sensorVisibleDiameter)',
+          )
+          replace_once(
+              'target initial clamp',
+              'clampPosition(targetLp, targetVisibleDiameter)',
+              'clampCirclePosition(targetLp, targetVisibleDiameter)',
+          )
+
+          replace_once(
+              'menu no implicit circle editing',
+              '''    private fun showMenu() {
+        if (menuPanel != null) return
+        tapEngine.refreshCapability()
+        setConfigurationTouchability(true)
+''',
+              '''    private fun showMenu() {
+        if (menuPanel != null) return
+        tapEngine.refreshCapability()
+        setConfigurationTouchability(false)
+''',
+          )
+
+          replace_once(
+              'floating button edit behavior',
+              '''            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                toggleMenu()
+                return true
+            }
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                toggleEngine()
+                return true
+            }
+''',
+              '''            override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                if (circleEditMode) finishCirclePositionEditing() else toggleMenu()
+                return true
+            }
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                if (circleEditMode) finishCirclePositionEditing() else toggleEngine()
+                return true
+            }
+''',
+          )
+
+          replace_once(
+              'smooth circle drag',
+              '''    private fun attachDrag(
+        view: View,
+        params: WindowManager.LayoutParams,
+        visibleDiameter: Int,
+        onMoved: (Int, Int) -> Unit,
+    ) {
+        var downX = 0f
+        var downY = 0f
+        var startX = 0
+        var startY = 0
+        view.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.rawX
+                    downY = event.rawY
+                    startX = params.x
+                    startY = params.y
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    params.x = startX + (event.rawX - downX).roundToInt()
+                    params.y = startY + (event.rawY - downY).roundToInt()
+                    clampPosition(params, visibleDiameter)
+                    windowManager.updateViewLayout(view, params)
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    onMoved(params.x, params.y)
+                    true
+                }
+                else -> true
+            }
+        }
+    }
+''',
+              '''    private fun attachDrag(
+        view: View,
+        params: WindowManager.LayoutParams,
+        visibleDiameter: Int,
+        onMoved: (Int, Int) -> Unit,
+    ) {
+        var grabOffsetX = 0f
+        var grabOffsetY = 0f
+        var framePending = false
+
+        fun scheduleFrame() {
+            if (framePending) return
+            framePending = true
+            view.postOnAnimation {
+                framePending = false
+                runCatching { windowManager.updateViewLayout(view, params) }
+            }
+        }
+
+        view.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    grabOffsetX = event.rawX - params.x
+                    grabOffsetY = event.rawY - params.y
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    params.x = (event.rawX - grabOffsetX).roundToInt()
+                    params.y = (event.rawY - grabOffsetY).roundToInt()
+                    clampCirclePosition(params, visibleDiameter)
+                    scheduleFrame()
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    clampCirclePosition(params, visibleDiameter)
+                    runCatching { windowManager.updateViewLayout(view, params) }
+                    onMoved(params.x, params.y)
+                    true
+                }
+                else -> true
+            }
+        }
+    }
+
+    private fun beginCirclePositionEditing() {
+        closeMenu()
+        circleEditMode = true
+        setCirclesVisible(true)
+        setConfigurationTouchability(true)
+        updateButtonVisual()
+        showMessage("اسحب الدائرتين إلى الموضع المطلوب، ثم اضغط ✓ للحفظ")
+    }
+
+    private fun finishCirclePositionEditing() {
+        if (!circleEditMode) return
+        circleEditMode = false
+        setConfigurationTouchability(false)
+        captureHandler?.post { detectionEngine.resetForSensorMove() }
+        updateButtonVisual()
+        showMessage("تم حفظ مواضع الدوائر")
+    }
+''',
+          )
+
+          replace_once(
+              'edit mode field',
+              '''    private var configMode = false
+    private var lastInputReady = false
+''',
+              '''    private var configMode = false
+    private var circleEditMode = false
+    private var lastInputReady = false
+''',
+          )
+
+          replace_once(
+              'button edit visual',
+              '''        val fill = when {
+            !engineEnabled -> Color.rgb(95, 95, 104)
+            tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> Color.rgb(165, 70, 190)
+            detectionEngine.state == DetectionEngine.State.ARMED -> Color.rgb(32, 170, 88)
+            else -> Color.rgb(91, 54, 221)
+        }
+        button.text = if (engineEnabled) "PT" else "OFF"
+        button.textSize = if (engineEnabled) 15f else 10f
+''',
+              '''        val fill = when {
+            circleEditMode -> Color.rgb(30, 165, 92)
+            !engineEnabled -> Color.rgb(95, 95, 104)
+            tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> Color.rgb(165, 70, 190)
+            detectionEngine.state == DetectionEngine.State.ARMED -> Color.rgb(32, 170, 88)
+            else -> Color.rgb(91, 54, 221)
+        }
+        button.text = when {
+            circleEditMode -> "✓"
+            engineEnabled -> "PT"
+            else -> "OFF"
+        }
+        button.textSize = if (circleEditMode || engineEnabled) 15f else 10f
+''',
+          )
+
+          replace_once(
+              'position card',
+              '''        content.addView(menuButton("إظهار / إخفاء الدوائر") { setCirclesVisible(!circlesVisible) }, matchWrap(dp(50)))
+''',
+              '''        content.addView(
+            actionCard(
+                "تعديل مواضع الدوائر",
+                "اضغط هنا، ثم اسحب دائرة المراقبة ودائرة الضغط لأي مكان على الشاشة. اضغط ✓ عند الانتهاء.",
+            ) { beginCirclePositionEditing() },
+            matchWrap(dp(88)),
+        )
+        content.addView(menuButton("إظهار / إخفاء الدوائر") { setCirclesVisible(!circlesVisible) }, matchWrap(dp(50)))
+''',
+          )
+
+          replace_once(
+              'smooth menu drag',
+              '''    private fun attachMenuDrag(handle: View, panel: View, params: WindowManager.LayoutParams) {
+        var downX = 0f
+        var downY = 0f
+        var startX = 0
+        var startY = 0
+        handle.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = event.rawX; downY = event.rawY; startX = params.x; startY = params.y; true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    params.x = startX + (event.rawX - downX).roundToInt()
+                    params.y = startY + (event.rawY - downY).roundToInt()
+                    clampMenuPosition(params)
+                    windowManager.updateViewLayout(panel, params)
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    preferences.edit().putInt(KEY_MENU_X, params.x).putInt(KEY_MENU_Y, params.y).apply()
+                    true
+                }
+                else -> true
+            }
+        }
+    }
+''',
+              '''    private fun attachMenuDrag(handle: View, panel: View, params: WindowManager.LayoutParams) {
+        var grabOffsetX = 0f
+        var grabOffsetY = 0f
+        var framePending = false
+
+        fun scheduleFrame() {
+            if (framePending) return
+            framePending = true
+            panel.postOnAnimation {
+                framePending = false
+                if (menuPanel === panel) runCatching { windowManager.updateViewLayout(panel, params) }
+            }
+        }
+
+        handle.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    grabOffsetX = event.rawX - params.x
+                    grabOffsetY = event.rawY - params.y
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    params.x = (event.rawX - grabOffsetX).roundToInt()
+                    params.y = (event.rawY - grabOffsetY).roundToInt()
+                    clampMenuPosition(params)
+                    scheduleFrame()
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    clampMenuPosition(params)
+                    runCatching { windowManager.updateViewLayout(panel, params) }
+                    preferences.edit().putInt(KEY_MENU_X, params.x).putInt(KEY_MENU_Y, params.y).apply()
+                    true
+                }
+                else -> true
+            }
+        }
+    }
+''',
+          )
+
+          replace_once(
+              'display geometry circle clamp',
+              '''        listOf(sensorView to sensorParams, targetView to targetParams, menuButton to menuButtonParams).forEach { (view, lp) ->
+            if (view != null && lp != null) {
+                clampPosition(lp, min(lp.width, lp.height))
+                runCatching { windowManager.updateViewLayout(view, lp) }
+            }
+        }
+''',
+              '''        sensorParams?.let { lp ->
+            clampCirclePosition(lp, sensorVisibleDiameter)
+            sensorView?.let { runCatching { windowManager.updateViewLayout(it, lp) } }
+        }
+        targetParams?.let { lp ->
+            val visibleDiameter = targetView?.visibleDiameterPx ?: min(lp.width, lp.height)
+            clampCirclePosition(lp, visibleDiameter)
+            targetView?.let { runCatching { windowManager.updateViewLayout(it, lp) } }
+        }
+        menuButtonParams?.let { lp ->
+            clampPosition(lp, min(lp.width, lp.height))
+            menuButton?.let { runCatching { windowManager.updateViewLayout(it, lp) } }
+        }
+''',
+          )
+
+          replace_once(
+              'circle clamp helper',
+              '''    private fun clampMenuPosition(params: WindowManager.LayoutParams) {
+        params.x = params.x.coerceIn(0, max(screenWidth - params.width, 0))
+        params.y = params.y.coerceIn(0, max(screenHeight - params.height, 0))
+    }
+''',
+              '''    private fun clampCirclePosition(params: WindowManager.LayoutParams, visibleDiameter: Int) {
+        val halfWindowW = max(params.width, 1) / 2f
+        val halfWindowH = max(params.height, 1) / 2f
+        val radius = max(visibleDiameter, 1) / 2f
+        val minCenterX = radius
+        val maxCenterX = max(screenWidth - radius, minCenterX)
+        val minCenterY = radius
+        val maxCenterY = max(screenHeight - radius, minCenterY)
+        val centerX = (params.x + halfWindowW).coerceIn(minCenterX, maxCenterX)
+        val centerY = (params.y + halfWindowH).coerceIn(minCenterY, maxCenterY)
+        params.x = (centerX - halfWindowW).roundToInt()
+        params.y = (centerY - halfWindowH).roundToInt()
+    }
+
+    private fun clampMenuPosition(params: WindowManager.LayoutParams) {
+        params.x = params.x.coerceIn(0, max(screenWidth - params.width, 0))
+        params.y = params.y.coerceIn(0, max(screenHeight - params.height, 0))
+    }
+''',
+          )
+
+          replace_once(
+              'action card helper',
+              '''    private fun menuButton(textValue: String, action: () -> Unit): Button = Button(this).apply {
+        text = textValue
+        textSize = 14f
+        setOnClickListener { action() }
+    }
+''',
+              '''    private fun actionCard(title: String, subtitle: String, action: () -> Unit): View =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            background = roundedBackground(Color.rgb(232, 247, 239), Color.rgb(64, 166, 105), 14f)
+            isClickable = true
+            isFocusable = true
+            addView(TextView(this@ScreenCaptureService).apply {
+                text = title
+                textSize = 16f
+                setTextColor(Color.rgb(20, 95, 55))
+            }, matchWrap())
+            addView(TextView(this@ScreenCaptureService).apply {
+                text = subtitle
+                textSize = 12f
+                setTextColor(Color.rgb(55, 75, 64))
+            }, matchWrap())
+            setOnClickListener { action() }
+        }
+
+    private fun menuButton(textValue: String, action: () -> Unit): Button = Button(this).apply {
+        text = textValue
+        textSize = 14f
+        setOnClickListener { action() }
+    }
+''',
+          )
+
+          replace_once(
+              'monitor diameter constant',
+              '''        private const val PREFS_NAME = "pixeltrigger_prefs"
+''',
+              '''        private const val PREFS_NAME = "pixeltrigger_prefs"
+        private const val MONITOR_DIAMETER_MM = 0.5f
+''',
+          )
+
+          service_path.write_text(s)
+
+          sensor_path = Path('app/src/main/java/com/pixeltrigger/app/ui/SensorOverlayView.kt')
+          sensor_path.write_text('''package com.pixeltrigger.app.ui
+
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.view.View
+import kotlin.math.min
+
+/**
+ * The visible colored sensor is exactly visibleDiameterPx across.
+ * The WindowManager view may be much larger for finger-friendly editing, but that invisible touch
+ * area must never enlarge either the rendered sensor or the sampled image region.
+ */
+class SensorOverlayView(context: Context, requestedVisibleDiameterPx: Int) : View(context) {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private var status: SensorStatus = SensorStatus.WAITING
+
+    val visibleDiameterPx: Int = maxOf(requestedVisibleDiameterPx, 1)
+    val outerDiameterPx: Int = visibleDiameterPx
+
+    fun setStatus(value: SensorStatus) {
+        status = value
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val cx = width / 2f
+        val cy = height / 2f
+        val diameter = min(visibleDiameterPx.toFloat(), min(width, height).toFloat()).coerceAtLeast(1f)
+        val outerRadius = diameter / 2f
+        val stroke = (diameter * 0.16f).coerceIn(1f, outerRadius.coerceAtLeast(1f))
+        val strokeRadius = (outerRadius - stroke / 2f).coerceAtLeast(0f)
+        val color = when (status) {
+            SensorStatus.OFF -> Color.rgb(120, 120, 126)
+            SensorStatus.WAITING -> Color.rgb(255, 184, 77)
+            SensorStatus.ARMED -> Color.rgb(60, 220, 120)
+            SensorStatus.FIRED -> Color.rgb(255, 80, 95)
+            SensorStatus.INPUT_NOT_READY -> Color.rgb(220, 85, 255)
+        }
+
+        fill.color = Color.argb(70, Color.red(color), Color.green(color), Color.blue(color))
+        paint.color = color
+        paint.strokeWidth = stroke
+
+        // Fill and stroke never exceed the requested physical diameter.
+        canvas.drawCircle(cx, cy, outerRadius, fill)
+        canvas.drawCircle(cx, cy, strokeRadius, paint)
+    }
+}
+''')
+          PY
+
+          ENGINE_SHA_AFTER="$(sha256sum "$ENGINE" | cut -d' ' -f1)"
+          if [ "$ENGINE_SHA_BEFORE" != "$ENGINE_SHA_AFTER" ]; then
+            echo 'ERROR: DetectionEngine.kt changed; refusing to continue.' >&2
+            exit 90
+          fi
+          git diff --exit-code -- "$ENGINE"
+
+          python3 <<'PY'
+          from pathlib import Path
+          s = Path('app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt').read_text()
+          sensor = Path('app/src/main/java/com/pixeltrigger/app/ui/SensorOverlayView.kt').read_text()
+          checks = {
+              '0.5 mm constant': 'MONITOR_DIAMETER_MM = 0.5f' in s,
+              'sampler radius tied to visible diameter': 'val screenRadius = sensorVisibleDiameter / 2f' in s,
+              'no old engine diameter reference': 'DetectionEngine.SENSOR_DIAMETER_MM' not in s,
+              'position edit card': 'تعديل مواضع الدوائر' in s,
+              'edge-aware circle clamp': 'clampCirclePosition' in s,
+              'smooth frame-coalesced menu drag': 'panel.postOnAnimation' in s,
+              'visible sensor has no dp inflation': '+ dp(10)' not in sensor and 'dp(12)' not in sensor,
+              'visible and outer diameters identical': 'val outerDiameterPx: Int = visibleDiameterPx' in sensor,
+          }
+          failed = [name for name, ok in checks.items() if not ok]
+          if failed:
+              raise SystemExit('Validation failed: ' + ', '.join(failed))
+          print('Overlay geometry validation PASS')
+          PY
+
+      - name: Run baseline tests and build verified APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs dist
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug --stacktrace 2>&1 | tee docs/CI_BUILD.log
+          cp app/build/outputs/apk/debug/app-debug.apk dist/PixelTrigger-v3-debug.apk
+          sha256sum dist/PixelTrigger-v3-debug.apk > dist/PixelTrigger-v3-debug.apk.sha256
+          {
+            echo '# PixelTrigger v3 CI build status'
+            echo
+            echo '**PASS**'
+            echo
+            echo 'Gradle exit code: 0'
+            echo "Source base commit: $GITHUB_SHA"
+            echo 'Overlay geometry: monitor visible diameter = sample diameter = 0.5 mm'
+            echo 'DetectionEngine.kt: unchanged and hash-guarded'
+            echo "APK SHA-256: $(sha256sum dist/PixelTrigger-v3-debug.apk | cut -d' ' -f1)"
+          } > docs/CI_BUILD_STATUS.md
+
+      - name: Commit only verified source and APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'PixelTrigger Fix Bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git rm .github/workflows/fix-v3-overlay-geometry.yml
+          git add app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt \
+                  app/src/main/java/com/pixeltrigger/app/ui/SensorOverlayView.kt \
+                  docs/CI_BUILD.log docs/CI_BUILD_STATUS.md \
+                  dist/PixelTrigger-v3-debug.apk dist/PixelTrigger-v3-debug.apk.sha256
+          git commit -m 'fix: exact 0.5mm monitor and smooth circle positioning'
+          git push origin HEAD:pixeltrigger-v3-shizuku

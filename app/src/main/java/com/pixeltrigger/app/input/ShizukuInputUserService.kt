@@ -26,36 +26,39 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     @Volatile private var lastDownNs = 0L
     @Volatile private var lastUpNs = 0L
     @Volatile private var detail = "not probed"
+    @Volatile private var cachedCapability = STATUS_NOT_READY
 
     private val injector: FrameworkInputInjector? by lazy { FrameworkInputInjector.create() }
 
     override fun getBackendUid(): Int = Process.myUid()
 
     override fun probeCapability(): Int {
-        if (Process.myUid() != SHELL_UID) {
-            detail = "PixelTrigger accepts Shizuku ADB/shell UID 2000 only; backend uid=${Process.myUid()}"
-            return STATUS_ROOT_OR_NON_SHELL_REJECTED
-        }
-        if (injector == null) {
-            detail = "InputManager.injectInputEvent unavailable on this build"
-            return STATUS_INJECTOR_UNAVAILABLE
-        }
-
-        val flag = readConcurrentTouchFlag()
-        return when (flag) {
-            FlagState.ENABLED -> {
-                detail = "enable_multi_device_same_window_stream=enabled; strict concurrent mode ready"
-                STATUS_SAFE
+        val status = when {
+            Process.myUid() != SHELL_UID -> {
+                detail = "PixelTrigger accepts Shizuku ADB/shell UID 2000 only; backend uid=${Process.myUid()}"
+                STATUS_ROOT_OR_NON_SHELL_REJECTED
             }
-            FlagState.DISABLED -> {
-                detail = "enable_multi_device_same_window_stream=disabled; injection blocked to protect player touch"
-                STATUS_CONCURRENT_TOUCH_UNSAFE
+            injector == null -> {
+                detail = "InputManager.injectInputEvent unavailable on this build"
+                STATUS_INJECTOR_UNAVAILABLE
             }
-            FlagState.UNKNOWN -> {
-                detail = "concurrent-touch feature state could not be verified; injection blocked in strict mode"
-                STATUS_CONCURRENT_TOUCH_UNKNOWN
+            else -> when (readConcurrentTouchFlag()) {
+                FlagState.ENABLED -> {
+                    detail = "enable_multi_device_same_window_stream=enabled; strict concurrent mode ready"
+                    STATUS_SAFE
+                }
+                FlagState.DISABLED -> {
+                    detail = "enable_multi_device_same_window_stream=disabled; injection blocked to protect player touch"
+                    STATUS_CONCURRENT_TOUCH_UNSAFE
+                }
+                FlagState.UNKNOWN -> {
+                    detail = "concurrent-touch feature state could not be verified; injection blocked in strict mode"
+                    STATUS_CONCURRENT_TOUCH_UNKNOWN
+                }
             }
         }
+        cachedCapability = status
+        return status
     }
 
     override fun getCapabilityDetail(): String = detail
@@ -67,7 +70,10 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         requestedDurationMs: Long,
         displayId: Int,
     ): Int {
-        if (probeCapability() != STATUS_SAFE) return STATUS_NOT_READY
+        // Hot path: never launch `aflags` or any subprocess here. Capability is probed when the
+        // UserService connects (and explicitly when the menu refreshes), then cached. This keeps
+        // FIRE -> DOWN latency limited to Binder + InputManager injection rather than shell startup.
+        if (Process.myUid() != SHELL_UID || cachedCapability != STATUS_SAFE) return STATUS_NOT_READY
         if (triggerId <= 0L || !acceptTriggerId(triggerId)) return STATUS_DUPLICATE
         if (!x.isFinite() || !y.isFinite()) return STATUS_INVALID_ARGUMENT
 

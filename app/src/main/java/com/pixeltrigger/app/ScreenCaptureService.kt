@@ -82,6 +82,7 @@ class ScreenCaptureService : Service() {
 
     private var circlesVisible = true
     @Volatile private var engineEnabled = true
+    private val engineStateLock = Any()
     private var configMode = false
     private var lastInputReady = false
 
@@ -223,7 +224,11 @@ class ScreenCaptureService : Service() {
         val target = targetParams ?: return
         val tapX = target.x + targetTouchSize / 2f
         val tapY = target.y + targetTouchSize / 2f
-        val result = tapCoordinator.fire(tapX, tapY, displayId = 0)
+        val result = synchronized(engineStateLock) {
+            // OFF wins over a frame that was already being processed when the user double-tapped PT.
+            if (!engineEnabled) return
+            tapCoordinator.fire(tapX, tapY, displayId = 0)
+        }
         if (result is TapResult.Rejected) {
             // Fail closed: never substitute Accessibility because that can cancel the player's touch.
             detectionEngine.resetForSensorMove()
@@ -359,15 +364,26 @@ class ScreenCaptureService : Service() {
     }
 
     private fun toggleEngine() {
-        engineEnabled = !engineEnabled
-        captureHandler?.post { detectionEngine.resetForSensorMove() }
-        updateSensorStatus(
-            if (!engineEnabled) SensorStatus.OFF
-            else if (tapEngine.isReady()) SensorStatus.WAITING
-            else SensorStatus.INPUT_NOT_READY,
-        )
-        updateButtonVisual()
-        menuStatusText?.text = engineStatusText()
+        val enableRequested = synchronized(engineStateLock) {
+            val requested = !engineEnabled
+            // Enter OFF immediately for both transitions. Re-enable only after the capture thread
+            // has reset all v2.12 arming state, so stale ARMED state can never fire on resume.
+            engineEnabled = false
+            requested
+        }
+
+        if (!enableRequested) {
+            captureHandler?.post { detectionEngine.resetForSensorMove() }
+            updateSensorStatus(SensorStatus.OFF)
+            return
+        }
+
+        val restart = Runnable {
+            detectionEngine.resetForSensorMove()
+            synchronized(engineStateLock) { engineEnabled = true }
+            updateSensorStatus(if (tapEngine.isReady()) SensorStatus.WAITING else SensorStatus.INPUT_NOT_READY)
+        }
+        captureHandler?.post(restart) ?: restart.run()
     }
 
     private fun updateButtonVisual() {
@@ -490,8 +506,10 @@ class ScreenCaptureService : Service() {
         root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         val margin = dp(10)
-        val width = min(dp(420), max(dp(220), screenWidth - margin * 2))
-        val height = min(dp(600), max(dp(180), screenHeight - margin * 2))
+        val availableWidth = max(screenWidth - margin * 2, 1)
+        val availableHeight = max(screenHeight - margin * 2, 1)
+        val width = min(dp(420), availableWidth).coerceAtLeast(min(dp(220), availableWidth))
+        val height = min(dp(600), availableHeight).coerceAtLeast(min(dp(180), availableHeight))
         val lp = WindowManager.LayoutParams(
             width,
             height,
@@ -593,8 +611,10 @@ class ScreenCaptureService : Service() {
         }
         menuPanelParams?.let { lp ->
             val panel = menuPanel ?: return@let
-            lp.width = min(dp(420), max(dp(220), screenWidth - dp(20)))
-            lp.height = min(dp(600), max(dp(180), screenHeight - dp(20)))
+            val availableWidth = max(screenWidth - dp(20), 1)
+            val availableHeight = max(screenHeight - dp(20), 1)
+            lp.width = min(dp(420), availableWidth).coerceAtLeast(min(dp(220), availableWidth))
+            lp.height = min(dp(600), availableHeight).coerceAtLeast(min(dp(180), availableHeight))
             clampMenuPosition(lp)
             runCatching { windowManager.updateViewLayout(panel, lp) }
         }

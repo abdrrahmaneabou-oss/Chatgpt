@@ -10,7 +10,7 @@ import rikka.shizuku.Shizuku
 
 /** App-side, no-root Shizuku tap backend. No Accessibility fallback is used silently. */
 class ShizukuTapEngine(private val context: Context) : TapEngine {
-    override val name: String = "shizuku-redmagic-nubia-virtual-touch"
+    override val name: String = "shizuku-redmagic-nubia-inputreader"
 
     @Volatile private var remote: IShizukuInputService? = null
     @Volatile var capability: InputCapability = InputCapability.DISCONNECTED
@@ -23,8 +23,8 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
     )
         .processNameSuffix("pixeltrigger_input")
         .daemon(false)
-        .tag("pixeltrigger-input-v5-nubia-cvt")
-        .version(5)
+        .tag("pixeltrigger-input-v6-nubia-inputreader")
+        .version(6)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -88,7 +88,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         return capability
     }
 
-    /** Experimental Nubia CVT mode: binder connected means FIRE can be submitted. */
+    /** Binder connected means FIRE can be submitted to the verified Nubia InputReader path. */
     fun isReady(): Boolean = remote != null
 
     override fun tap(request: TapRequest): TapResult {

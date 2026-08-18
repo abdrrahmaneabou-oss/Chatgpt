@@ -10,7 +10,7 @@ import rikka.shizuku.Shizuku
 
 /** App-side, no-root Shizuku tap backend. No Accessibility fallback is used silently. */
 class ShizukuTapEngine(private val context: Context) : TapEngine {
-    override val name: String = "shizuku-shell-input"
+    override val name: String = "shizuku-shell-input-direct"
 
     @Volatile private var remote: IShizukuInputService? = null
     @Volatile var capability: InputCapability = InputCapability.DISCONNECTED
@@ -23,8 +23,8 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
     )
         .processNameSuffix("pixeltrigger_input")
         .daemon(false)
-        .tag("pixeltrigger-input-v3")
-        .version(3)
+        .tag("pixeltrigger-input-v4-direct")
+        .version(4)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -88,15 +88,13 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         return capability
     }
 
-    fun isReady(): Boolean = capability == InputCapability.CONCURRENT_TOUCH_SAFE && remote != null
+    /** Direct mode: once the Shizuku UserService binder is connected, do not gate FIRE on a feature flag. */
+    fun isReady(): Boolean = remote != null
 
     override fun tap(request: TapRequest): TapResult {
         val acceptedAt = SystemClock.elapsedRealtimeNanos()
         val service = remote
             ?: return TapResult.Rejected(request.triggerId, acceptedAt, "Shizuku input service disconnected")
-        if (capability != InputCapability.CONCURRENT_TOUCH_SAFE) {
-            return TapResult.Rejected(request.triggerId, acceptedAt, "unsafe/unknown concurrent-touch capability: $capabilityDetail")
-        }
         val code = runCatching {
             service.injectTap(
                 request.triggerId,

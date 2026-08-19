@@ -32,7 +32,7 @@ class DetectionEngine(
                 averageChroma <= HOLD_WHITE_AVERAGE_CHROMA
 
         /**
-         * FIRE is a luminance threshold with a near-black channel guard.
+         * FIRE is a luminance threshold with a conservative near-black channel guard.
          * The guard prevents strongly saturated low-luminance colors (for example
          * deep blue) from being mistaken for black merely because their weighted
          * luminance is low.
@@ -201,8 +201,8 @@ class DetectionEngine(
 
         /** Inclusive luminance ceiling for a DARK/FIRE sample. */
         const val FIRE_MAX_LUMINANCE = 72
-        /** Near-black guard: saturated colors above this channel value remain NEUTRAL. */
-        const val FIRE_MAX_CHANNEL = 96
+        /** Conservative near-black guard; keeps the previous maximum-channel boundary. */
+        const val FIRE_MAX_CHANNEL = 72
 
         const val REQUIRED_ARM_FRAMES = 3
         const val REQUIRED_CHANGE_FRAMES = 1

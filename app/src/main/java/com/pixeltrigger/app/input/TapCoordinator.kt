@@ -3,7 +3,7 @@ package com.pixeltrigger.app.input
 import android.os.SystemClock
 import java.util.concurrent.atomic.AtomicLong
 
-/** Converts each detector FIRE directly into one tap request. */
+/** Converts each detector FIRE directly into one tap request. Rebuilt after protection-gate cleanup. */
 class TapCoordinator(
     private val engine: TapEngine,
 ) {

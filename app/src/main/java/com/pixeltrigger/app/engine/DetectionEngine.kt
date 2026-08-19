@@ -1,10 +1,11 @@
 package com.pixeltrigger.app.engine
 
 /**
- * PixelTrigger v2.12 white arming/rearming with a strict near-black FIRE rule.
+ * White-only arming/rearming with coverage-based near-black FIRE detection.
  *
- * Only white can arm or rearm. Once ARMED, bright/colored non-white samples are
- * neutral and keep the engine ARMED. A near-black sample fires immediately.
+ * The monitored circle is very small and MediaProjection is downscaled, so a few
+ * edge/filter pixels can heavily skew whole-region RGB averages. Classification
+ * therefore uses per-pixel WHITE/DARK coverage as the primary signal.
  */
 class DetectionEngine(
     var whiteRearmEnabled: Boolean = true,
@@ -18,30 +19,20 @@ class DetectionEngine(
         val averageGreen: Int,
         val averageBlue: Int,
         val whiteRatio: Float,
+        val darkRatio: Float,
         val averageLuminance: Int,
         val averageChroma: Int,
     ) {
-        fun isArmingWhite(): Boolean =
-            whiteRatio >= ARM_WHITE_COVERAGE &&
-                averageLuminance >= ARM_WHITE_AVERAGE_LUMINANCE &&
-                averageChroma <= ARM_WHITE_AVERAGE_CHROMA
+        /** Only a majority-white sample may contribute an arming frame. */
+        fun isArmingWhite(): Boolean = whiteRatio >= ARM_WHITE_COVERAGE
 
-        fun isHoldingWhite(): Boolean =
-            whiteRatio >= HOLD_WHITE_COVERAGE &&
-                averageLuminance >= HOLD_WHITE_AVERAGE_LUMINANCE &&
-                averageChroma <= HOLD_WHITE_AVERAGE_CHROMA
+        fun isHoldingWhite(): Boolean = whiteRatio >= HOLD_WHITE_COVERAGE
 
         /**
-         * DARK/FIRE is driven by luminance, as required. Chroma is only a guard
-         * against saturated dark colors (deep blue/red/etc.) that are visually far
-         * from black despite having low weighted luminance.
-         *
-         * Do not gate on max(R,G,B): capture/filtering can make one channel exceed
-         * the luminance threshold even when the sampled region is visibly black.
+         * FIRE is based on how much of the monitored circle is actually near-black.
+         * This survives mixed edge pixels without turning saturated dark colors into FIRE.
          */
-        fun isFireDark(): Boolean =
-            averageLuminance <= FIRE_MAX_LUMINANCE &&
-                averageChroma <= FIRE_MAX_CHROMA
+        fun isFireDark(): Boolean = darkRatio >= FIRE_DARK_COVERAGE
 
         fun isMeaningfulChangeFrom(reference: ColorSample): Boolean {
             val channelDelta = maxOf(
@@ -130,7 +121,7 @@ class DetectionEngine(
 
     private fun updateTriggerState(sample: ColorSample, nowMs: Long): Event = when (state) {
         State.WAITING_FOR_WHITE -> {
-            // Only white can arm. Colored/neutral/dark samples never arm by themselves.
+            // Exactly three consecutive WHITE frames are still required.
             whiteFrames = if (sample.isArmingWhite()) whiteFrames + 1 else 0
             if (whiteFrames >= REQUIRED_ARM_FRAMES) {
                 arm(sample)
@@ -139,17 +130,14 @@ class DetectionEngine(
         }
 
         State.ARMED -> {
-            // White and every non-dark color keep ARMED. The very first DARK frame fires.
+            // WHITE and NEUTRAL hold ARMED; the first DARK frame fires immediately.
             if (sample.isFireDark()) {
                 fire(nowMs)
                 Event.Fired(nowMs)
-            } else {
-                Event.None
-            }
+            } else Event.None
         }
 
         State.WAITING_REARM -> {
-            // Rearming remains white-only and always requires three consecutive frames.
             whiteFrames = if (sample.isArmingWhite()) whiteFrames + 1 else 0
             val whiteReady = whiteRearmEnabled && whiteFrames >= REQUIRED_REARM_FRAMES
             val delayReady = !rearmDelayEnabled || nowMs - firedAtMs >= rearmSeconds * 1000L
@@ -182,28 +170,37 @@ class DetectionEngine(
     }
 
     companion object {
-        const val WHITE_PIXEL_LUMINANCE = 195
-        const val WHITE_PIXEL_MIN_CHANNEL = 175
-        const val WHITE_PIXEL_MAX_CHROMA = 55
+        // Per-pixel WHITE definition.
+        const val WHITE_PIXEL_LUMINANCE = 190
+        const val WHITE_PIXEL_MIN_CHANNEL = 170
+        const val WHITE_PIXEL_MAX_CHROMA = 60
         const val MIN_SAMPLE_PIXELS = 3
 
+        // Coverage is intentionally tolerant of edge/filter pixels, while three
+        // consecutive frames prevent one noisy frame from arming the engine.
+        const val ARM_WHITE_COVERAGE = 0.50f
+        const val HOLD_WHITE_COVERAGE = 0.35f
+
+        // Legacy diagnostic constants kept for compatibility; not used to decide arming.
         const val ARM_WHITE_AVERAGE_LUMINANCE = 195
         const val ARM_WHITE_AVERAGE_CHROMA = 50
-        const val ARM_WHITE_COVERAGE = 0.60f
-
         const val HOLD_WHITE_AVERAGE_LUMINANCE = 170
         const val HOLD_WHITE_AVERAGE_CHROMA = 70
-        const val HOLD_WHITE_COVERAGE = 0.35f
 
         const val MIN_CHANGE_CHANNEL_DELTA = 30
         const val MIN_CHANGE_LUMINANCE_DROP = 26
         const val MIN_CHANGE_CHROMA_RISE = 24
         const val MIN_CHANGE_WHITE_COVERAGE_DROP = 0.35f
 
-        /** Inclusive luminance ceiling for a DARK/FIRE sample. */
-        const val FIRE_MAX_LUMINANCE = 72
-        /** Allows normal capture tint/noise around black while rejecting saturated colors. */
-        const val FIRE_MAX_CHROMA = 90
+        // Per-pixel DARK definition + minimum circle coverage for FIRE.
+        const val DARK_PIXEL_MAX_LUMINANCE = 88
+        const val DARK_PIXEL_MAX_CHANNEL = 118
+        const val DARK_PIXEL_MAX_CHROMA = 72
+        const val FIRE_DARK_COVERAGE = 0.45f
+
+        // Kept as aliases for diagnostics/tests that referenced the prior names.
+        const val FIRE_MAX_LUMINANCE = DARK_PIXEL_MAX_LUMINANCE
+        const val FIRE_MAX_CHROMA = DARK_PIXEL_MAX_CHROMA
 
         const val REQUIRED_ARM_FRAMES = 3
         const val REQUIRED_CHANGE_FRAMES = 1

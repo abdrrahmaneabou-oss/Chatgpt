@@ -9,6 +9,9 @@ class DetectionEngineBaselineTest {
     private val neutralBlue = DetectionEngine.ColorSample(45, 170, 205, 0.02f, 150, 160)
     private val neutralGray = DetectionEngine.ColorSample(120, 120, 120, 0.05f, 120, 0)
     private val nearBlack = DetectionEngine.ColorSample(19, 24, 29, 0.00f, 23, 10)
+    // Typical capture/filter tint around a region that is still visibly black.
+    // One channel exceeds the luminance threshold, so the old max-channel gate rejected it.
+    private val tintedNearBlack = DetectionEngine.ColorSample(45, 60, 100, 0.00f, 59, 55)
     private val lowLuminanceSaturatedBlue = DetectionEngine.ColorSample(0, 0, 150, 0.00f, 17, 150)
 
     @Test fun armingNeedsThreeConsecutiveWhiteFrames() {
@@ -22,8 +25,8 @@ class DetectionEngineBaselineTest {
 
     @Test fun neutralOrDarkCannotArmByThemselves() {
         val e = DetectionEngine()
-        val samples = listOf(neutralBlue, neutralGray, nearBlack, lowLuminanceSaturatedBlue)
-        repeat(12) { index ->
+        val samples = listOf(neutralBlue, neutralGray, nearBlack, tintedNearBlack, lowLuminanceSaturatedBlue)
+        repeat(15) { index ->
             assertTrue(e.processSample(samples[index % samples.size], index.toLong()) is DetectionEngine.Event.None)
         }
         assertEquals(DetectionEngine.State.WAITING_FOR_WHITE, e.state)
@@ -54,6 +57,13 @@ class DetectionEngineBaselineTest {
         assertTrue(e.processSample(nearBlack, 10) is DetectionEngine.Event.Fired)
         assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
         assertEquals(null, e.armedWhiteSample)
+    }
+
+    @Test fun tintedNearBlackWithOneChannelAbove72StillFires() {
+        val e = DetectionEngine()
+        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
+        assertTrue(e.processSample(tintedNearBlack, 10) is DetectionEngine.Event.Fired)
+        assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
     }
 
     @Test fun luminanceAboveDarkThresholdDoesNotFire() {
@@ -95,7 +105,7 @@ class DetectionEngineBaselineTest {
         assertEquals(24, DetectionEngine.MIN_CHANGE_CHROMA_RISE)
         assertEquals(0.35f, DetectionEngine.MIN_CHANGE_WHITE_COVERAGE_DROP)
         assertEquals(72, DetectionEngine.FIRE_MAX_LUMINANCE)
-        assertEquals(72, DetectionEngine.FIRE_MAX_CHANNEL)
+        assertEquals(90, DetectionEngine.FIRE_MAX_CHROMA)
         assertEquals(3, DetectionEngine.REQUIRED_ARM_FRAMES)
         assertEquals(1, DetectionEngine.REQUIRED_CHANGE_FRAMES)
         assertEquals(3, DetectionEngine.REQUIRED_REARM_FRAMES)

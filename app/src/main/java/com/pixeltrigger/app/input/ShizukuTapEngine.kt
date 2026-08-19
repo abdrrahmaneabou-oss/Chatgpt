@@ -22,9 +22,11 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         ComponentName(context.packageName, ShizukuInputUserService::class.java.name),
     )
         .processNameSuffix("pixeltrigger_input")
-        .daemon(false)
-        .tag("pixeltrigger-input-v8-ultralow-direct-binder")
-        .version(8)
+        // Keep the already-warmed shell process alive so FIRE never depends on a
+        // just-created UserService. This improves single-shot reliability without retries.
+        .daemon(true)
+        .tag("pixeltrigger-input-v9-single-shot")
+        .version(9)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -88,17 +90,24 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         return capability
     }
 
-    /** Binder connected means FIRE can be submitted to the Nubia InputReader path. */
-    fun isReady(): Boolean = remote != null
+    /**
+     * FIRE is enabled only after the UserService has completed capability probing and
+     * warmed the Nubia injector. Mere Binder connection is not enough.
+     */
+    fun isReady(): Boolean =
+        remote != null && capability == InputCapability.CONCURRENT_TOUCH_SAFE
 
     /**
-     * Hot path: one one-way Binder transaction only. No synchronous vendor wait and
-     * no post-tap diagnostic Binder reads are allowed here.
+     * Hot path: exactly one one-way Binder transaction. No retry, no backup DOWN,
+     * no synchronous vendor wait and no post-tap diagnostic Binder reads.
      */
     override fun tap(request: TapRequest): TapResult {
         val acceptedAt = SystemClock.elapsedRealtimeNanos()
         val service = remote
             ?: return TapResult.Failed(request.triggerId, acceptedAt, "Shizuku input service disconnected")
+        if (capability != InputCapability.CONCURRENT_TOUCH_SAFE) {
+            return TapResult.Failed(request.triggerId, acceptedAt, "Nubia input backend not warmed/ready")
+        }
 
         return runCatching {
             service.injectTapFast(
@@ -114,6 +123,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
                 upSentAtNs = 0L,
             )
         }.getOrElse {
+            // Deliberately do not retry: one FIRE must never become two taps.
             TapResult.Failed(request.triggerId, acceptedAt, "binder submit error: ${it.message ?: it.javaClass.simpleName}")
         }
     }

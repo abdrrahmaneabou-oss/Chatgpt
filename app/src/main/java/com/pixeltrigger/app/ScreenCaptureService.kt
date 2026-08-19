@@ -41,7 +41,6 @@ import com.pixeltrigger.app.engine.PixelSampler
 import com.pixeltrigger.app.input.InputCapability
 import com.pixeltrigger.app.input.ShizukuTapEngine
 import com.pixeltrigger.app.input.TapCoordinator
-import com.pixeltrigger.app.input.TapResult
 import com.pixeltrigger.app.ui.SensorOverlayView
 import com.pixeltrigger.app.ui.SensorStatus
 import com.pixeltrigger.app.ui.TargetOverlayView
@@ -64,6 +63,13 @@ class ScreenCaptureService : Service() {
     private var screenWidth = 0
     private var screenHeight = 0
     private var densityDpi = 0
+    private var captureWidth = 0
+    private var captureHeight = 0
+    private var captureDensityDpi = 0
+
+    @Volatile private var lastFrameAgeNs = 0L
+    @Volatile private var lastSamplerNs = 0L
+    @Volatile private var lastFireSubmitNs = 0L
 
     private var sensorView: SensorOverlayView? = null
     private var sensorParams: WindowManager.LayoutParams? = null
@@ -82,7 +88,6 @@ class ScreenCaptureService : Service() {
 
     private var circlesVisible = true
     @Volatile private var engineEnabled = true
-    private val engineStateLock = Any()
     private var configMode = false
     @Volatile private var circleEditMode = false
     private var lastInputReady = false
@@ -96,7 +101,7 @@ class ScreenCaptureService : Service() {
         override fun onDisplayRemoved(displayId: Int) = Unit
         override fun onDisplayChanged(displayId: Int) {
             mainHandler.removeCallbacks(refreshDisplayRunnable)
-            mainHandler.postDelayed(refreshDisplayRunnable, 120L)
+            mainHandler.postDelayed(refreshDisplayRunnable, DISPLAY_REFRESH_DEBOUNCE_MS)
         }
     }
     private val refreshDisplayRunnable = Runnable { refreshDisplayGeometry() }
@@ -145,6 +150,7 @@ class ScreenCaptureService : Service() {
         screenWidth = bounds.width()
         screenHeight = bounds.height()
         densityDpi = resources.displayMetrics.densityDpi
+        updateCaptureGeometry()
 
         captureThread = HandlerThread("PixelTriggerCapture", Process.THREAD_PRIORITY_URGENT_DISPLAY).also { it.start() }
         captureHandler = Handler(captureThread!!.looper)
@@ -156,12 +162,12 @@ class ScreenCaptureService : Service() {
                     override fun onStop() = stopSelf()
                 }, mainHandler)
             }
-        imageReader = createImageReader(screenWidth, screenHeight)
+        imageReader = createImageReader(captureWidth, captureHeight)
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "PixelTriggerDisplay",
-            screenWidth,
-            screenHeight,
-            densityDpi,
+            captureWidth,
+            captureHeight,
+            captureDensityDpi,
             DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
             imageReader?.surface,
             null,
@@ -173,6 +179,12 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    private fun updateCaptureGeometry() {
+        captureWidth = max((screenWidth * CAPTURE_SCALE).roundToInt(), 1)
+        captureHeight = max((screenHeight * CAPTURE_SCALE).roundToInt(), 1)
+        captureDensityDpi = max((densityDpi * CAPTURE_SCALE).roundToInt(), 1)
+    }
+
     private fun createImageReader(width: Int, height: Int): ImageReader =
         ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2).also { reader ->
             reader.setOnImageAvailableListener({ source ->
@@ -181,6 +193,12 @@ class ScreenCaptureService : Service() {
         }
 
     private fun processImage(image: Image) {
+        val processStartedNs = SystemClock.elapsedRealtimeNanos()
+        val imageTimestampNs = image.timestamp
+        if (imageTimestampNs > 0L && processStartedNs >= imageTimestampNs) {
+            lastFrameAgeNs = processStartedNs - imageTimestampNs
+        }
+
         if (!engineEnabled || circleEditMode) return
 
         val inputReady = tapEngine.isReady()
@@ -205,37 +223,33 @@ class ScreenCaptureService : Service() {
         val screenRadius = sensorVisibleDiameter / 2f
         val radiusX = max(0.5f, crop.width() * screenRadius / screenWidth)
         val radiusY = max(0.5f, crop.height() * screenRadius / screenHeight)
+
+        val samplerStartedNs = SystemClock.elapsedRealtimeNanos()
         val sample = PixelSampler.sampleCircularRegion(image, centerX, centerY, radiusX, radiusY) ?: return
+        lastSamplerNs = SystemClock.elapsedRealtimeNanos() - samplerStartedNs
 
         when (val event = detectionEngine.processSample(sample, SystemClock.elapsedRealtime())) {
             is DetectionEngine.Event.Armed,
             is DetectionEngine.Event.Rearmed,
             is DetectionEngine.Event.ManualRearmed -> updateSensorStatus(SensorStatus.ARMED)
             is DetectionEngine.Event.Fired -> {
-                updateSensorStatus(SensorStatus.FIRED)
+                val submitStartedNs = SystemClock.elapsedRealtimeNanos()
                 executeTapImmediately()
+                lastFireSubmitNs = SystemClock.elapsedRealtimeNanos() - submitStartedNs
+                updateSensorStatus(SensorStatus.FIRED)
             }
             is DetectionEngine.Event.ManualRearmTimedOut -> showMessage("لم يتم التسليح: اللون الأبيض غير موجود")
             else -> Unit
         }
     }
 
-    /** Called on the high-priority capture thread immediately after DetectionEngine FIRE. */
+    /** Hot path: queue one one-way Shizuku transaction and return immediately. */
     private fun executeTapImmediately() {
+        if (!engineEnabled) return
         val target = targetParams ?: return
         val tapX = target.x + targetTouchSize / 2f
         val tapY = target.y + targetTouchSize / 2f
-        val result = synchronized(engineStateLock) {
-            // OFF wins over a frame that was already being processed when the user double-tapped PT.
-            if (!engineEnabled) return
-            tapCoordinator.fire(tapX, tapY, displayId = 0)
-        }
-        if (result is TapResult.Rejected) {
-            // Fail closed: never substitute Accessibility because that can cancel the player's touch.
-            detectionEngine.resetForSensorMove()
-            updateSensorStatus(SensorStatus.INPUT_NOT_READY)
-            showMessage("تم منع الضغطة لحماية التحكم: ${result.reason}")
-        }
+        tapCoordinator.fire(tapX, tapY, displayId = 0)
     }
 
     private fun createOverlays() {
@@ -284,7 +298,7 @@ class ScreenCaptureService : Service() {
         val buttonLp = overlayParams(buttonSize, buttonSize).apply {
             x = preferences.getInt(KEY_BUTTON_X, max(screenWidth - buttonSize - dp(12), 0))
             y = preferences.getInt(KEY_BUTTON_Y, dp(60))
-            flags = baseOverlayFlags() // always touchable
+            flags = baseOverlayFlags()
         }
         menuButtonParams = buttonLp
         clampPosition(buttonLp, buttonSize)
@@ -392,13 +406,8 @@ class ScreenCaptureService : Service() {
     }
 
     private fun toggleEngine() {
-        val enableRequested = synchronized(engineStateLock) {
-            val requested = !engineEnabled
-            // Enter OFF immediately for both transitions. Re-enable only after the capture thread
-            // has reset all v2.12 arming state, so stale ARMED state can never fire on resume.
-            engineEnabled = false
-            requested
-        }
+        val enableRequested = !engineEnabled
+        engineEnabled = false
 
         if (!enableRequested) {
             captureHandler?.post { detectionEngine.resetForSensorMove() }
@@ -408,7 +417,7 @@ class ScreenCaptureService : Service() {
 
         val restart = Runnable {
             detectionEngine.resetForSensorMove()
-            synchronized(engineStateLock) { engineEnabled = true }
+            engineEnabled = true
             updateSensorStatus(if (tapEngine.isReady()) SensorStatus.WAITING else SensorStatus.INPUT_NOT_READY)
         }
         captureHandler?.post(restart) ?: restart.run()
@@ -469,7 +478,7 @@ class ScreenCaptureService : Service() {
         }
         content.addView(menuStatusText, matchWrap())
         content.addView(TextView(this).apply {
-            text = "Input: ${tapEngine.capability}\n${tapEngine.capabilityDetail}"
+            text = "Input: ${tapEngine.capability}\n${tapEngine.capabilityDetail}\n${tapEngine.latencyDetail()}\n${captureStatsText()}"
             textSize = 12f
             setTextColor(Color.rgb(70, 70, 88))
             gravity = Gravity.CENTER
@@ -568,6 +577,11 @@ class ScreenCaptureService : Service() {
         attachMenuDrag(header, root, lp)
     }
 
+    private fun captureStatsText(): String {
+        fun ms(ns: Long): String = if (ns <= 0L) "n/a" else String.format(java.util.Locale.US, "%.3fms", ns / 1_000_000.0)
+        return "capture=${captureWidth}x${captureHeight} (${(CAPTURE_SCALE * 100).roundToInt()}%); frameAge=${ms(lastFrameAgeNs)}; sampler=${ms(lastSamplerNs)}; fireSubmit=${ms(lastFireSubmitNs)}"
+    }
+
     private fun attachMenuDrag(handle: View, panel: View, params: WindowManager.LayoutParams) {
         var grabOffsetX = 0f
         var grabOffsetY = 0f
@@ -646,12 +660,13 @@ class ScreenCaptureService : Service() {
         screenWidth = newWidth
         screenHeight = newHeight
         densityDpi = resources.displayMetrics.densityDpi
+        updateCaptureGeometry()
 
         captureHandler?.post {
-            val replacement = createImageReader(newWidth, newHeight)
+            val replacement = createImageReader(captureWidth, captureHeight)
             val old = imageReader
             imageReader = replacement
-            virtualDisplay?.resize(newWidth, newHeight, densityDpi)
+            virtualDisplay?.resize(captureWidth, captureHeight, captureDensityDpi)
             virtualDisplay?.surface = replacement.surface
             old?.close()
             detectionEngine.resetForSensorMove()
@@ -783,7 +798,7 @@ class ScreenCaptureService : Service() {
     private fun buildNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_menu_view)
         .setContentTitle("PixelTrigger")
-        .setContentText("مراقبة البكسل فعّالة — Shizuku No Root")
+        .setContentText("مراقبة البكسل فعّالة — Ultra-low latency / Shizuku")
         .setOngoing(true)
         .build()
 
@@ -818,6 +833,8 @@ class ScreenCaptureService : Service() {
         private const val NOTIFICATION_ID = 41
         private const val PREFS_NAME = "pixeltrigger_prefs"
         private const val MONITOR_DIAMETER_MM = 0.5f
+        private const val CAPTURE_SCALE = 0.5f
+        private const val DISPLAY_REFRESH_DEBOUNCE_MS = 16L
         private const val KEY_SENSOR_X = "sensor_x"
         private const val KEY_SENSOR_Y = "sensor_y"
         private const val KEY_TARGET_X = "target_x"

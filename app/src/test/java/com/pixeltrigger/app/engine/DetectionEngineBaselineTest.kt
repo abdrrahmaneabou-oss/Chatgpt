@@ -9,6 +9,7 @@ class DetectionEngineBaselineTest {
     private val neutralBlue = DetectionEngine.ColorSample(45, 170, 205, 0.02f, 150, 160)
     private val neutralGray = DetectionEngine.ColorSample(120, 120, 120, 0.05f, 120, 0)
     private val nearBlack = DetectionEngine.ColorSample(19, 24, 29, 0.00f, 23, 10)
+    private val lowLuminanceSaturatedBlue = DetectionEngine.ColorSample(0, 0, 150, 0.00f, 17, 150)
 
     @Test fun armingNeedsThreeConsecutiveWhiteFrames() {
         val e = DetectionEngine()
@@ -19,12 +20,23 @@ class DetectionEngineBaselineTest {
         assertEquals(white, e.armedWhiteSample)
     }
 
-    @Test fun neutralColorsCannotArmByThemselves() {
+    @Test fun neutralOrDarkCannotArmByThemselves() {
         val e = DetectionEngine()
-        repeat(8) { index ->
-            assertTrue(e.processSample(if (index % 2 == 0) neutralBlue else neutralGray, index.toLong()) is DetectionEngine.Event.None)
+        val samples = listOf(neutralBlue, neutralGray, nearBlack, lowLuminanceSaturatedBlue)
+        repeat(12) { index ->
+            assertTrue(e.processSample(samples[index % samples.size], index.toLong()) is DetectionEngine.Event.None)
         }
         assertEquals(DetectionEngine.State.WAITING_FOR_WHITE, e.state)
+    }
+
+    @Test fun nonWhiteBreaksConsecutiveWhiteArmingSequence() {
+        val e = DetectionEngine()
+        assertTrue(e.processSample(white, 1) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(white, 2) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(neutralBlue, 3) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(white, 4) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(white, 5) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(white, 6) is DetectionEngine.Event.Armed)
     }
 
     @Test fun neutralColorsKeepAlreadyArmedEngineArmed() {
@@ -32,6 +44,7 @@ class DetectionEngineBaselineTest {
         e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
         assertTrue(e.processSample(neutralBlue, 4) is DetectionEngine.Event.None)
         assertTrue(e.processSample(neutralGray, 5) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(lowLuminanceSaturatedBlue, 6) is DetectionEngine.Event.None)
         assertEquals(DetectionEngine.State.ARMED, e.state)
     }
 
@@ -41,6 +54,21 @@ class DetectionEngineBaselineTest {
         assertTrue(e.processSample(nearBlack, 10) is DetectionEngine.Event.Fired)
         assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
         assertEquals(null, e.armedWhiteSample)
+    }
+
+    @Test fun luminanceAboveDarkThresholdDoesNotFire() {
+        val e = DetectionEngine()
+        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
+        val aboveThresholdGray = DetectionEngine.ColorSample(73, 73, 73, 0.00f, 73, 0)
+        assertTrue(e.processSample(aboveThresholdGray, 4) is DetectionEngine.Event.None)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
+    }
+
+    @Test fun saturatedLowLuminanceColorDoesNotFire() {
+        val e = DetectionEngine()
+        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
+        assertTrue(e.processSample(lowLuminanceSaturatedBlue, 4) is DetectionEngine.Event.None)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
     }
 
     @Test fun nonWhiteButNotNearBlackDoesNotFire() {
@@ -66,13 +94,14 @@ class DetectionEngineBaselineTest {
         assertEquals(26, DetectionEngine.MIN_CHANGE_LUMINANCE_DROP)
         assertEquals(24, DetectionEngine.MIN_CHANGE_CHROMA_RISE)
         assertEquals(0.35f, DetectionEngine.MIN_CHANGE_WHITE_COVERAGE_DROP)
-        assertEquals(72, DetectionEngine.FIRE_MAX_CHANNEL)
+        assertEquals(72, DetectionEngine.FIRE_MAX_LUMINANCE)
+        assertEquals(96, DetectionEngine.FIRE_MAX_CHANNEL)
         assertEquals(3, DetectionEngine.REQUIRED_ARM_FRAMES)
         assertEquals(1, DetectionEngine.REQUIRED_CHANGE_FRAMES)
         assertEquals(3, DetectionEngine.REQUIRED_REARM_FRAMES)
         assertEquals(0.8f, DetectionEngine.SENSOR_DIAMETER_MM)
         assertEquals(35L, DetectionEngine.MANUAL_REARM_MENU_SETTLE_MS)
         assertEquals(500L, DetectionEngine.MANUAL_REARM_TIMEOUT_MS)
-        assertEquals(2, DetectionEngine.MANUAL_REARM_WHITE_FRAMES)
+        assertEquals(3, DetectionEngine.MANUAL_REARM_WHITE_FRAMES)
     }
 }

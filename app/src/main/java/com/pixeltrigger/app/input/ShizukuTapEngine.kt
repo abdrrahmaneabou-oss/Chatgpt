@@ -10,7 +10,7 @@ import rikka.shizuku.Shizuku
 
 /** App-side, no-root Shizuku tap backend. No Accessibility fallback is used silently. */
 class ShizukuTapEngine(private val context: Context) : TapEngine {
-    override val name: String = "shizuku-redmagic-nubia-inputreader"
+    override val name: String = "shizuku-redmagic-nubia-inputreader-ultralow"
 
     @Volatile private var remote: IShizukuInputService? = null
     @Volatile var capability: InputCapability = InputCapability.DISCONNECTED
@@ -23,8 +23,8 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
     )
         .processNameSuffix("pixeltrigger_input")
         .daemon(false)
-        .tag("pixeltrigger-input-v6-nubia-inputreader")
-        .version(6)
+        .tag("pixeltrigger-input-v8-ultralow-direct-binder")
+        .version(8)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -88,40 +88,40 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         return capability
     }
 
-    /** Binder connected means FIRE can be submitted to the verified Nubia InputReader path. */
+    /** Binder connected means FIRE can be submitted to the Nubia InputReader path. */
     fun isReady(): Boolean = remote != null
 
+    /**
+     * Hot path: one one-way Binder transaction only. No synchronous vendor wait and
+     * no post-tap diagnostic Binder reads are allowed here.
+     */
     override fun tap(request: TapRequest): TapResult {
         val acceptedAt = SystemClock.elapsedRealtimeNanos()
         val service = remote
             ?: return TapResult.Failed(request.triggerId, acceptedAt, "Shizuku input service disconnected")
 
-        val code = runCatching {
-            service.injectTap(
+        return runCatching {
+            service.injectTapFast(
                 request.triggerId,
                 request.x,
                 request.y,
-                1L,
                 request.displayId,
             )
-        }.getOrElse {
-            return TapResult.Failed(request.triggerId, acceptedAt, "binder injection error: ${it.message}")
-        }
-
-        if (code != ShizukuInputUserService.STATUS_OK) {
-            return TapResult.Failed(
-                request.triggerId,
-                acceptedAt,
-                "remote status=$code: ${runCatching { service.capabilityDetail }.getOrDefault("")}",
+            TapResult.Completed(
+                triggerId = request.triggerId,
+                acceptedAtNs = acceptedAt,
+                downSentAtNs = 0L,
+                upSentAtNs = 0L,
             )
+        }.getOrElse {
+            TapResult.Failed(request.triggerId, acceptedAt, "binder submit error: ${it.message ?: it.javaClass.simpleName}")
         }
+    }
 
-        return TapResult.Completed(
-            triggerId = request.triggerId,
-            acceptedAtNs = acceptedAt,
-            downSentAtNs = runCatching { service.lastDownNs }.getOrDefault(0L),
-            upSentAtNs = runCatching { service.lastUpNs }.getOrDefault(0L),
-        )
+    /** Slow diagnostics path, called only from UI/menu code, never from FIRE. */
+    fun latencyDetail(): String {
+        val service = remote ?: return "latency: disconnected"
+        return runCatching { service.latencyDetail }.getOrDefault("latency: unavailable")
     }
 
     fun disconnect() {

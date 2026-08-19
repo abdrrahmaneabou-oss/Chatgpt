@@ -95,7 +95,7 @@ class DetectionEngineBaselineTest {
         assertEquals(24, DetectionEngine.MIN_CHANGE_CHROMA_RISE)
         assertEquals(0.35f, DetectionEngine.MIN_CHANGE_WHITE_COVERAGE_DROP)
         assertEquals(72, DetectionEngine.FIRE_MAX_LUMINANCE)
-        assertEquals(96, DetectionEngine.FIRE_MAX_CHANNEL)
+        assertEquals(72, DetectionEngine.FIRE_MAX_CHANNEL)
         assertEquals(3, DetectionEngine.REQUIRED_ARM_FRAMES)
         assertEquals(1, DetectionEngine.REQUIRED_CHANGE_FRAMES)
         assertEquals(3, DetectionEngine.REQUIRED_REARM_FRAMES)

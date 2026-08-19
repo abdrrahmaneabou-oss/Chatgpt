@@ -32,14 +32,16 @@ class DetectionEngine(
                 averageChroma <= HOLD_WHITE_AVERAGE_CHROMA
 
         /**
-         * FIRE is a luminance threshold with a conservative near-black channel guard.
-         * The guard prevents strongly saturated low-luminance colors (for example
-         * deep blue) from being mistaken for black merely because their weighted
-         * luminance is low.
+         * DARK/FIRE is driven by luminance, as required. Chroma is only a guard
+         * against saturated dark colors (deep blue/red/etc.) that are visually far
+         * from black despite having low weighted luminance.
+         *
+         * Do not gate on max(R,G,B): capture/filtering can make one channel exceed
+         * the luminance threshold even when the sampled region is visibly black.
          */
         fun isFireDark(): Boolean =
             averageLuminance <= FIRE_MAX_LUMINANCE &&
-                maxOf(averageRed, averageGreen, averageBlue) <= FIRE_MAX_CHANNEL
+                averageChroma <= FIRE_MAX_CHROMA
 
         fun isMeaningfulChangeFrom(reference: ColorSample): Boolean {
             val channelDelta = maxOf(
@@ -137,8 +139,7 @@ class DetectionEngine(
         }
 
         State.ARMED -> {
-            // White holds ARMED. Any non-dark color is neutral and also holds ARMED.
-            // Only black/near-black is FIRE, and the first such frame fires immediately.
+            // White and every non-dark color keep ARMED. The very first DARK frame fires.
             if (sample.isFireDark()) {
                 fire(nowMs)
                 Event.Fired(nowMs)
@@ -201,8 +202,8 @@ class DetectionEngine(
 
         /** Inclusive luminance ceiling for a DARK/FIRE sample. */
         const val FIRE_MAX_LUMINANCE = 72
-        /** Conservative near-black guard; keeps the previous maximum-channel boundary. */
-        const val FIRE_MAX_CHANNEL = 72
+        /** Allows normal capture tint/noise around black while rejecting saturated colors. */
+        const val FIRE_MAX_CHROMA = 90
 
         const val REQUIRED_ARM_FRAMES = 3
         const val REQUIRED_CHANGE_FRAMES = 1

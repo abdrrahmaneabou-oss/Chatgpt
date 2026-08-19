@@ -1,11 +1,10 @@
 package com.pixeltrigger.app.engine
 
 /**
- * PixelTrigger v2.12 arming/rearming baseline with the v3 direct-fire rule.
+ * PixelTrigger v2.12 white arming/rearming with a strict near-black FIRE rule.
  *
- * Arming thresholds and required arming frames remain unchanged from v2.12.
- * Once ARMED, the first captured frame that no longer satisfies isArmingWhite()
- * fires immediately. Input/tap delivery is handled elsewhere.
+ * Only white can arm or rearm. Once ARMED, bright/colored non-white samples are
+ * neutral and keep the engine ARMED. A near-black sample fires immediately.
  */
 class DetectionEngine(
     var whiteRearmEnabled: Boolean = true,
@@ -31,6 +30,13 @@ class DetectionEngine(
             whiteRatio >= HOLD_WHITE_COVERAGE &&
                 averageLuminance >= HOLD_WHITE_AVERAGE_LUMINANCE &&
                 averageChroma <= HOLD_WHITE_AVERAGE_CHROMA
+
+        /**
+         * FIRE is intentionally based on distance from black, not merely on being
+         * non-white. This keeps saturated/bright colors neutral while ARMED.
+         */
+        fun isFireDark(): Boolean =
+            maxOf(averageRed, averageGreen, averageBlue) <= FIRE_MAX_CHANNEL
 
         fun isMeaningfulChangeFrom(reference: ColorSample): Boolean {
             val channelDelta = maxOf(
@@ -71,9 +77,6 @@ class DetectionEngine(
     private var changedFrames: Int = 0
     private var manualRearmWhiteFrames: Int = 0
 
-    /**
-     * Mirrors v2.12 rearm-override processing order, then applies the direct-fire rule.
-     */
     fun processSample(sample: ColorSample, nowMs: Long): Event {
         val manualEvent = processOneTimeRearmOverride(sample, nowMs)
         if (manualEvent is Event.ManualRearmed || manualEvent is Event.ManualRearmTimedOut) {
@@ -122,6 +125,7 @@ class DetectionEngine(
 
     private fun updateTriggerState(sample: ColorSample, nowMs: Long): Event = when (state) {
         State.WAITING_FOR_WHITE -> {
+            // Only white can arm. Colored/neutral/dark samples never arm by themselves.
             whiteFrames = if (sample.isArmingWhite()) whiteFrames + 1 else 0
             if (whiteFrames >= REQUIRED_ARM_FRAMES) {
                 arm(sample)
@@ -130,9 +134,9 @@ class DetectionEngine(
         }
 
         State.ARMED -> {
-            // No holding-white threshold, meaningful-change threshold, debounce, or delay here.
-            // The first frame that is not arming-white fires immediately.
-            if (!sample.isArmingWhite()) {
+            // White holds ARMED. Any non-black color is neutral and also holds ARMED.
+            // Only black/near-black is FIRE, and the first such frame fires immediately.
+            if (sample.isFireDark()) {
                 fire(nowMs)
                 Event.Fired(nowMs)
             } else {
@@ -141,6 +145,7 @@ class DetectionEngine(
         }
 
         State.WAITING_REARM -> {
+            // Rearming remains white-only.
             whiteFrames = if (sample.isArmingWhite()) whiteFrames + 1 else 0
             val whiteReady = whiteRearmEnabled && whiteFrames >= REQUIRED_REARM_FRAMES
             val delayReady = !rearmDelayEnabled || nowMs - firedAtMs >= rearmSeconds * 1000L
@@ -190,6 +195,9 @@ class DetectionEngine(
         const val MIN_CHANGE_LUMINANCE_DROP = 26
         const val MIN_CHANGE_CHROMA_RISE = 24
         const val MIN_CHANGE_WHITE_COVERAGE_DROP = 0.35f
+
+        /** Inclusive upper bound for the darkest RGB channel maximum considered FIRE. */
+        const val FIRE_MAX_CHANNEL = 72
 
         const val REQUIRED_ARM_FRAMES = 3
         const val REQUIRED_CHANGE_FRAMES = 1

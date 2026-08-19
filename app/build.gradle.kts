@@ -11,8 +11,8 @@ android {
         applicationId = "com.pixeltrigger.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 34
-        versionName = "3.0-nubia-inputreader-v6"
+        versionCode = 35
+        versionName = "3.1-ultralow-v8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

@@ -94,7 +94,8 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
     override fun tap(request: TapRequest): TapResult {
         val acceptedAt = SystemClock.elapsedRealtimeNanos()
         val service = remote
-            ?: return TapResult.Rejected(request.triggerId, acceptedAt, "Shizuku input service disconnected")
+            ?: return TapResult.Failed(request.triggerId, acceptedAt, "Shizuku input service disconnected")
+
         val code = runCatching {
             service.injectTap(
                 request.triggerId,
@@ -104,11 +105,17 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
                 request.displayId,
             )
         }.getOrElse {
-            return TapResult.Rejected(request.triggerId, acceptedAt, "binder injection error: ${it.message}")
+            return TapResult.Failed(request.triggerId, acceptedAt, "binder injection error: ${it.message}")
         }
+
         if (code != ShizukuInputUserService.STATUS_OK) {
-            return TapResult.Rejected(request.triggerId, acceptedAt, "remote status=$code: ${runCatching { service.capabilityDetail }.getOrDefault("")}")
+            return TapResult.Failed(
+                request.triggerId,
+                acceptedAt,
+                "remote status=$code: ${runCatching { service.capabilityDetail }.getOrDefault("")}",
+            )
         }
+
         return TapResult.Completed(
             triggerId = request.triggerId,
             acceptedAtNs = acceptedAt,

@@ -8,7 +8,7 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
-/** Exact v2.12 color rules with a cached geometric sample plan for the hot path. */
+/** Cached circular sampler with per-pixel WHITE/DARK coverage for robust tiny-region detection. */
 object PixelSampler {
     private data class SamplePlan(
         val radiusXBits: Int,
@@ -42,6 +42,7 @@ object PixelSampler {
         var luminanceTotal = 0L
         var chromaTotal = 0L
         var whiteCount = 0
+        var darkCount = 0
         var count = 0
         val base = buffer.position()
 
@@ -66,12 +67,21 @@ object PixelSampler {
             blueTotal += blue
             luminanceTotal += luminance
             chromaTotal += chroma
+
             if (
                 luminance >= DetectionEngine.WHITE_PIXEL_LUMINANCE &&
                 minimumChannel >= DetectionEngine.WHITE_PIXEL_MIN_CHANNEL &&
                 chroma <= DetectionEngine.WHITE_PIXEL_MAX_CHROMA
             ) {
                 whiteCount++
+            }
+
+            if (
+                luminance <= DetectionEngine.DARK_PIXEL_MAX_LUMINANCE &&
+                maximumChannel <= DetectionEngine.DARK_PIXEL_MAX_CHANNEL &&
+                chroma <= DetectionEngine.DARK_PIXEL_MAX_CHROMA
+            ) {
+                darkCount++
             }
             count++
         }
@@ -82,6 +92,7 @@ object PixelSampler {
             averageGreen = (greenTotal / count).toInt(),
             averageBlue = (blueTotal / count).toInt(),
             whiteRatio = whiteCount.toFloat() / count.toFloat(),
+            darkRatio = darkCount.toFloat() / count.toFloat(),
             averageLuminance = (luminanceTotal / count).toInt(),
             averageChroma = (chromaTotal / count).toInt(),
         )

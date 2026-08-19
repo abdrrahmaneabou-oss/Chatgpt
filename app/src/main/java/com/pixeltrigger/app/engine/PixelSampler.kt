@@ -8,8 +8,17 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
-/** Exact v2.12 pixel-region sampler, kept separate from tap delivery. */
+/** Exact v2.12 color rules with a cached geometric sample plan for the hot path. */
 object PixelSampler {
+    private data class SamplePlan(
+        val radiusXBits: Int,
+        val radiusYBits: Int,
+        val dx: IntArray,
+        val dy: IntArray,
+    )
+
+    private var cachedPlan: SamplePlan? = null
+
     fun sampleCircularRegion(
         image: Image,
         centerX: Int,
@@ -26,6 +35,7 @@ object PixelSampler {
         val rowStride = plane.rowStride
         if (pixelStride < 3 || rowStride <= 0) return null
 
+        val plan = planFor(radiusX, radiusY)
         var redTotal = 0L
         var greenTotal = 0L
         var blueTotal = 0L
@@ -35,42 +45,35 @@ object PixelSampler {
         var count = 0
         val base = buffer.position()
 
-        val minX = max(floor(centerX - radiusX).toInt(), crop.left)
-        val maxX = min(ceil(centerX + radiusX).toInt(), crop.right - 1)
-        val minY = max(floor(centerY - radiusY).toInt(), crop.top)
-        val maxY = min(ceil(centerY + radiusY).toInt(), crop.bottom - 1)
+        for (i in plan.dx.indices) {
+            val x = centerX + plan.dx[i]
+            val y = centerY + plan.dy[i]
+            if (x < crop.left || x >= crop.right || y < crop.top || y >= crop.bottom) continue
 
-        for (y in minY..maxY) {
-            val normalizedY = (y - centerY) / radiusY
-            for (x in minX..maxX) {
-                val normalizedX = (x - centerX) / radiusX
-                if (normalizedX * normalizedX + normalizedY * normalizedY > 1f) continue
+            val offset = base + y * rowStride + x * pixelStride
+            if (offset < 0 || offset + 2 >= buffer.limit()) continue
 
-                val offset = base + y * rowStride + x * pixelStride
-                if (offset < 0 || offset + 2 >= buffer.limit()) continue
+            val red = buffer.get(offset).toInt() and 0xff
+            val green = buffer.get(offset + 1).toInt() and 0xff
+            val blue = buffer.get(offset + 2).toInt() and 0xff
+            val minimumChannel = min(red, min(green, blue))
+            val maximumChannel = max(red, max(green, blue))
+            val chroma = maximumChannel - minimumChannel
+            val luminance = ((red * 54) + (green * 183) + (blue * 19)) shr 8
 
-                val red = buffer.get(offset).toInt() and 0xff
-                val green = buffer.get(offset + 1).toInt() and 0xff
-                val blue = buffer.get(offset + 2).toInt() and 0xff
-                val minimumChannel = min(red, min(green, blue))
-                val maximumChannel = max(red, max(green, blue))
-                val chroma = maximumChannel - minimumChannel
-                val luminance = ((red * 54) + (green * 183) + (blue * 19)) shr 8
-
-                redTotal += red
-                greenTotal += green
-                blueTotal += blue
-                luminanceTotal += luminance
-                chromaTotal += chroma
-                if (
-                    luminance >= DetectionEngine.WHITE_PIXEL_LUMINANCE &&
-                    minimumChannel >= DetectionEngine.WHITE_PIXEL_MIN_CHANNEL &&
-                    chroma <= DetectionEngine.WHITE_PIXEL_MAX_CHROMA
-                ) {
-                    whiteCount++
-                }
-                count++
+            redTotal += red
+            greenTotal += green
+            blueTotal += blue
+            luminanceTotal += luminance
+            chromaTotal += chroma
+            if (
+                luminance >= DetectionEngine.WHITE_PIXEL_LUMINANCE &&
+                minimumChannel >= DetectionEngine.WHITE_PIXEL_MIN_CHANNEL &&
+                chroma <= DetectionEngine.WHITE_PIXEL_MAX_CHROMA
+            ) {
+                whiteCount++
             }
+            count++
         }
 
         if (count < DetectionEngine.MIN_SAMPLE_PIXELS) return null
@@ -82,5 +85,38 @@ object PixelSampler {
             averageLuminance = (luminanceTotal / count).toInt(),
             averageChroma = (chromaTotal / count).toInt(),
         )
+    }
+
+    private fun planFor(radiusX: Float, radiusY: Float): SamplePlan {
+        val safeRadiusX = max(radiusX, 0.5f)
+        val safeRadiusY = max(radiusY, 0.5f)
+        val xBits = safeRadiusX.toBits()
+        val yBits = safeRadiusY.toBits()
+        cachedPlan?.let { if (it.radiusXBits == xBits && it.radiusYBits == yBits) return it }
+
+        val minDx = floor(-safeRadiusX).toInt()
+        val maxDx = ceil(safeRadiusX).toInt()
+        val minDy = floor(-safeRadiusY).toInt()
+        val maxDy = ceil(safeRadiusY).toInt()
+        val xs = ArrayList<Int>()
+        val ys = ArrayList<Int>()
+
+        for (dy in minDy..maxDy) {
+            val normalizedY = dy / safeRadiusY
+            for (dx in minDx..maxDx) {
+                val normalizedX = dx / safeRadiusX
+                if (normalizedX * normalizedX + normalizedY * normalizedY <= 1f) {
+                    xs.add(dx)
+                    ys.add(dy)
+                }
+            }
+        }
+
+        return SamplePlan(
+            radiusXBits = xBits,
+            radiusYBits = yBits,
+            dx = xs.toIntArray(),
+            dy = ys.toIntArray(),
+        ).also { cachedPlan = it }
     }
 }

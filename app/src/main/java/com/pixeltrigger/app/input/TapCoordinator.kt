@@ -18,6 +18,13 @@ class TapCoordinator(
             requestedAtNs = SystemClock.elapsedRealtimeNanos(),
             displayId = displayId,
         )
-        return engine.tap(request)
+        return when (val result = engine.tap(request)) {
+            is TapResult.Rejected -> TapResult.Failed(
+                triggerId = result.triggerId,
+                acceptedAtNs = result.acceptedAtNs,
+                reason = result.reason,
+            )
+            else -> result
+        }
     }
 }

@@ -201,13 +201,18 @@ class ScreenCaptureService : Service() {
 
         if (!engineEnabled || circleEditMode) return
 
+        // Input readiness is UI/input state only. It must never erase detector state.
         val inputReady = tapEngine.isReady()
         if (inputReady != lastInputReady) {
             lastInputReady = inputReady
-            detectionEngine.resetForSensorMove()
-            updateSensorStatus(if (inputReady) SensorStatus.WAITING else SensorStatus.INPUT_NOT_READY)
+            val status = when {
+                !inputReady -> SensorStatus.INPUT_NOT_READY
+                detectionEngine.state == DetectionEngine.State.ARMED -> SensorStatus.ARMED
+                detectionEngine.state == DetectionEngine.State.WAITING_REARM -> SensorStatus.FIRED
+                else -> SensorStatus.WAITING
+            }
+            updateSensorStatus(status)
         }
-        if (!inputReady) return
 
         val params = sensorParams ?: return
         if (screenWidth <= 0 || screenHeight <= 0) return
@@ -228,10 +233,14 @@ class ScreenCaptureService : Service() {
         val sample = PixelSampler.sampleCircularRegion(image, centerX, centerY, radiusX, radiusY) ?: return
         lastSamplerNs = SystemClock.elapsedRealtimeNanos() - samplerStartedNs
 
-        when (val event = detectionEngine.processSample(sample, SystemClock.elapsedRealtime())) {
+        // Re-check immediately before the state transition. WHITE detection/arming is
+        // never gated. DARK only consumes FIRE when the one-way Nubia path is ready.
+        val fireAllowedNow = tapEngine.isReady()
+        when (val event = detectionEngine.processSample(sample, SystemClock.elapsedRealtime(), fireAllowed = fireAllowedNow)) {
             is DetectionEngine.Event.Armed,
             is DetectionEngine.Event.Rearmed,
-            is DetectionEngine.Event.ManualRearmed -> updateSensorStatus(SensorStatus.ARMED)
+            is DetectionEngine.Event.ManualRearmed ->
+                updateSensorStatus(if (fireAllowedNow) SensorStatus.ARMED else SensorStatus.INPUT_NOT_READY)
             is DetectionEngine.Event.Fired -> {
                 val submitStartedNs = SystemClock.elapsedRealtimeNanos()
                 executeTapImmediately()
@@ -832,7 +841,7 @@ class ScreenCaptureService : Service() {
         private const val CHANNEL_ID = "pixeltrigger_monitor"
         private const val NOTIFICATION_ID = 41
         private const val PREFS_NAME = "pixeltrigger_prefs"
-        private const val MONITOR_DIAMETER_MM = 0.5f
+        private const val MONITOR_DIAMETER_MM = 0.3f
         private const val CAPTURE_SCALE = 0.5f
         private const val DISPLAY_REFRESH_DEBOUNCE_MS = 16L
         private const val KEY_SENSOR_X = "sensor_x"

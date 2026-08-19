@@ -52,12 +52,13 @@ jobs:
             echo
             echo '- Unit tests: PASS'
             echo '- APK build: PASS'
-            echo '- Arming: original v2.12 thresholds + 3 consecutive white frames'
-            echo '- FIRE: first captured frame after ARMED that fails isArmingWhite()'
+            echo '- Arming: original v2.12 white thresholds + 3 consecutive white frames'
+            echo '- FIRE: only DARK/near-black after ARMED (luminance threshold + near-black channel guard)'
+            echo '- NEUTRAL: stays ARMED and never arms from zero'
             echo '- Tap backend: Shizuku shell -> Nubia InputManager.virtualTouchEvent -> InputReader/NubiaGamepad'
             echo '- Virtual pointer params: keyCode=-4, DOWN=0, UP=2, mode=1, gamepadId=-2'
             echo '- Accessibility fallback: none'
-            echo '- Requested DOWN/UP separation: ~1 ms'
+            echo '- Requested DOWN/UP separation: ~1 ms after DOWN returns'
             echo '- Generic InputManager.injectInputEvent: not used'
             echo "- APK SHA-256: $(sha256sum dist/PixelTrigger-v3-debug.apk | cut -d' ' -f1)"
           } > docs/DIRECT_FIRE_STATUS.md

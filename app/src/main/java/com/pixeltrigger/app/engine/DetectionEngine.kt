@@ -3,9 +3,9 @@ package com.pixeltrigger.app.engine
 /**
  * White-only arming/rearming with coverage-based near-black FIRE detection.
  *
- * The monitored circle is very small and MediaProjection is downscaled, so a few
- * edge/filter pixels can heavily skew whole-region RGB averages. Classification
- * therefore uses per-pixel WHITE/DARK coverage as the primary signal.
+ * Detection state is intentionally independent from input-backend readiness:
+ * WHITE may arm while Shizuku is temporarily unavailable, and DARK must not
+ * consume the one FIRE until the input path is actually ready.
  */
 class DetectionEngine(
     var whiteRearmEnabled: Boolean = true,
@@ -23,15 +23,10 @@ class DetectionEngine(
         val averageLuminance: Int,
         val averageChroma: Int,
     ) {
-        /** Only a majority-white sample may contribute an arming frame. */
         fun isArmingWhite(): Boolean = whiteRatio >= ARM_WHITE_COVERAGE
 
         fun isHoldingWhite(): Boolean = whiteRatio >= HOLD_WHITE_COVERAGE
 
-        /**
-         * FIRE is based on how much of the monitored circle is actually near-black.
-         * This survives mixed edge pixels without turning saturated dark colors into FIRE.
-         */
         fun isFireDark(): Boolean = darkRatio >= FIRE_DARK_COVERAGE
 
         fun isMeaningfulChangeFrom(reference: ColorSample): Boolean {
@@ -73,12 +68,17 @@ class DetectionEngine(
     private var changedFrames: Int = 0
     private var manualRearmWhiteFrames: Int = 0
 
-    fun processSample(sample: ColorSample, nowMs: Long): Event {
+    /**
+     * [fireAllowed] gates only the ARMED -> FIRE transition. It never gates WHITE
+     * detection or arming. When false, a DARK sample keeps the engine ARMED so the
+     * event cannot be lost merely because Shizuku readiness flickered for a frame.
+     */
+    fun processSample(sample: ColorSample, nowMs: Long, fireAllowed: Boolean = true): Event {
         val manualEvent = processOneTimeRearmOverride(sample, nowMs)
         if (manualEvent is Event.ManualRearmed || manualEvent is Event.ManualRearmTimedOut) {
             return manualEvent
         }
-        return updateTriggerState(sample, nowMs)
+        return updateTriggerState(sample, nowMs, fireAllowed)
     }
 
     fun requestOneTimeRearmOverride(nowMs: Long): Boolean {
@@ -119,9 +119,8 @@ class DetectionEngine(
         return Event.None
     }
 
-    private fun updateTriggerState(sample: ColorSample, nowMs: Long): Event = when (state) {
+    private fun updateTriggerState(sample: ColorSample, nowMs: Long, fireAllowed: Boolean): Event = when (state) {
         State.WAITING_FOR_WHITE -> {
-            // Exactly three consecutive WHITE frames are still required.
             whiteFrames = if (sample.isArmingWhite()) whiteFrames + 1 else 0
             if (whiteFrames >= REQUIRED_ARM_FRAMES) {
                 arm(sample)
@@ -130,8 +129,7 @@ class DetectionEngine(
         }
 
         State.ARMED -> {
-            // WHITE and NEUTRAL hold ARMED; the first DARK frame fires immediately.
-            if (sample.isFireDark()) {
+            if (fireAllowed && sample.isFireDark()) {
                 fire(nowMs)
                 Event.Fired(nowMs)
             } else Event.None
@@ -170,18 +168,14 @@ class DetectionEngine(
     }
 
     companion object {
-        // Per-pixel WHITE definition.
         const val WHITE_PIXEL_LUMINANCE = 190
         const val WHITE_PIXEL_MIN_CHANNEL = 170
         const val WHITE_PIXEL_MAX_CHROMA = 60
         const val MIN_SAMPLE_PIXELS = 3
 
-        // Coverage is intentionally tolerant of edge/filter pixels, while three
-        // consecutive frames prevent one noisy frame from arming the engine.
         const val ARM_WHITE_COVERAGE = 0.50f
         const val HOLD_WHITE_COVERAGE = 0.35f
 
-        // Legacy diagnostic constants kept for compatibility; not used to decide arming.
         const val ARM_WHITE_AVERAGE_LUMINANCE = 195
         const val ARM_WHITE_AVERAGE_CHROMA = 50
         const val HOLD_WHITE_AVERAGE_LUMINANCE = 170
@@ -192,20 +186,18 @@ class DetectionEngine(
         const val MIN_CHANGE_CHROMA_RISE = 24
         const val MIN_CHANGE_WHITE_COVERAGE_DROP = 0.35f
 
-        // Per-pixel DARK definition + minimum circle coverage for FIRE.
         const val DARK_PIXEL_MAX_LUMINANCE = 88
         const val DARK_PIXEL_MAX_CHANNEL = 118
         const val DARK_PIXEL_MAX_CHROMA = 72
         const val FIRE_DARK_COVERAGE = 0.45f
 
-        // Kept as aliases for diagnostics/tests that referenced the prior names.
         const val FIRE_MAX_LUMINANCE = DARK_PIXEL_MAX_LUMINANCE
         const val FIRE_MAX_CHROMA = DARK_PIXEL_MAX_CHROMA
 
         const val REQUIRED_ARM_FRAMES = 3
         const val REQUIRED_CHANGE_FRAMES = 1
         const val REQUIRED_REARM_FRAMES = 3
-        const val SENSOR_DIAMETER_MM = 0.8f
+        const val SENSOR_DIAMETER_MM = 0.3f
 
         const val MANUAL_REARM_MENU_SETTLE_MS = 35L
         const val MANUAL_REARM_TIMEOUT_MS = 500L

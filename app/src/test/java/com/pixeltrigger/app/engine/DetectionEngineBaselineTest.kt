@@ -6,9 +6,11 @@ import org.junit.Test
 
 class DetectionEngineBaselineTest {
     private val white = DetectionEngine.ColorSample(240, 240, 240, 0.90f, 240, 0)
-    private val dark = DetectionEngine.ColorSample(120, 120, 120, 0.05f, 120, 0)
+    private val neutralBlue = DetectionEngine.ColorSample(45, 170, 205, 0.02f, 150, 160)
+    private val neutralGray = DetectionEngine.ColorSample(120, 120, 120, 0.05f, 120, 0)
+    private val nearBlack = DetectionEngine.ColorSample(19, 24, 29, 0.00f, 23, 10)
 
-    @Test fun armingNeedsThreeConsecutiveFrames() {
+    @Test fun armingNeedsThreeConsecutiveWhiteFrames() {
         val e = DetectionEngine()
         assertTrue(e.processSample(white, 1) is DetectionEngine.Event.None)
         assertTrue(e.processSample(white, 2) is DetectionEngine.Event.None)
@@ -17,24 +19,36 @@ class DetectionEngineBaselineTest {
         assertEquals(white, e.armedWhiteSample)
     }
 
-    @Test fun firstClearlyNonWhiteFrameFires() {
+    @Test fun neutralColorsCannotArmByThemselves() {
+        val e = DetectionEngine()
+        repeat(8) { index ->
+            assertTrue(e.processSample(if (index % 2 == 0) neutralBlue else neutralGray, index.toLong()) is DetectionEngine.Event.None)
+        }
+        assertEquals(DetectionEngine.State.WAITING_FOR_WHITE, e.state)
+    }
+
+    @Test fun neutralColorsKeepAlreadyArmedEngineArmed() {
         val e = DetectionEngine()
         e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
-        assertTrue(e.processSample(dark, 10) is DetectionEngine.Event.Fired)
+        assertTrue(e.processSample(neutralBlue, 4) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(neutralGray, 5) is DetectionEngine.Event.None)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
+    }
+
+    @Test fun firstNearBlackFrameFires() {
+        val e = DetectionEngine()
+        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
+        assertTrue(e.processSample(nearBlack, 10) is DetectionEngine.Event.Fired)
         assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
         assertEquals(null, e.armedWhiteSample)
     }
 
-    @Test fun firstFrameBelowArmingWhiteFiresEvenWithoutOldMeaningfulChange() {
+    @Test fun nonWhiteButNotNearBlackDoesNotFire() {
         val e = DetectionEngine()
         e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
-
-        // RGB/luminance/chroma are unchanged and white coverage drops only 0.31.
-        // Under the old meaningfulChange logic this would NOT fire because the
-        // coverage-drop threshold was 0.35 and holding-white would still be true.
         val justNotArmingWhite = DetectionEngine.ColorSample(240, 240, 240, 0.59f, 240, 0)
-        assertTrue(e.processSample(justNotArmingWhite, 4) is DetectionEngine.Event.Fired)
-        assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
+        assertTrue(e.processSample(justNotArmingWhite, 4) is DetectionEngine.Event.None)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
     }
 
     @Test fun allFrozenV212ArmingConstantsStayExact() {
@@ -52,6 +66,7 @@ class DetectionEngineBaselineTest {
         assertEquals(26, DetectionEngine.MIN_CHANGE_LUMINANCE_DROP)
         assertEquals(24, DetectionEngine.MIN_CHANGE_CHROMA_RISE)
         assertEquals(0.35f, DetectionEngine.MIN_CHANGE_WHITE_COVERAGE_DROP)
+        assertEquals(72, DetectionEngine.FIRE_MAX_CHANNEL)
         assertEquals(3, DetectionEngine.REQUIRED_ARM_FRAMES)
         assertEquals(1, DetectionEngine.REQUIRED_CHANGE_FRAMES)
         assertEquals(3, DetectionEngine.REQUIRED_REARM_FRAMES)

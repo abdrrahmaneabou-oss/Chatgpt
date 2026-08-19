@@ -31,6 +31,25 @@ class DetectionEngineBaselineTest {
         assertEquals(DetectionEngine.State.ARMED, e.state)
     }
 
+    @Test fun whiteStillArmsWhileInputIsTemporarilyUnavailable() {
+        val e = DetectionEngine()
+        assertTrue(e.processSample(white, 1, fireAllowed = false) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(white, 2, fireAllowed = false) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(white, 3, fireAllowed = false) is DetectionEngine.Event.Armed)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
+    }
+
+    @Test fun darkDoesNotConsumeFireWhileInputUnavailable() {
+        val e = DetectionEngine()
+        e.processSample(white, 1)
+        e.processSample(white, 2)
+        e.processSample(white, 3)
+        assertTrue(e.processSample(nearBlack, 4, fireAllowed = false) is DetectionEngine.Event.None)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
+        assertTrue(e.processSample(nearBlack, 5, fireAllowed = true) is DetectionEngine.Event.Fired)
+        assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
+    }
+
     @Test fun mixedWhiteStillArmsAfterThreeFrames() {
         val e = DetectionEngine()
         assertTrue(e.processSample(mixedWhite, 1) is DetectionEngine.Event.None)
@@ -105,6 +124,7 @@ class DetectionEngineBaselineTest {
         assertEquals(3, DetectionEngine.REQUIRED_ARM_FRAMES)
         assertEquals(3, DetectionEngine.REQUIRED_REARM_FRAMES)
         assertEquals(3, DetectionEngine.MANUAL_REARM_WHITE_FRAMES)
+        assertEquals(0.3f, DetectionEngine.SENSOR_DIAMETER_MM)
         assertEquals(0.50f, DetectionEngine.ARM_WHITE_COVERAGE)
         assertEquals(0.45f, DetectionEngine.FIRE_DARK_COVERAGE)
         assertEquals(190, DetectionEngine.WHITE_PIXEL_LUMINANCE)

@@ -32,11 +32,14 @@ class DetectionEngine(
                 averageChroma <= HOLD_WHITE_AVERAGE_CHROMA
 
         /**
-         * FIRE is intentionally based on distance from black, not merely on being
-         * non-white. This keeps saturated/bright colors neutral while ARMED.
+         * FIRE is a luminance threshold with a near-black channel guard.
+         * The guard prevents strongly saturated low-luminance colors (for example
+         * deep blue) from being mistaken for black merely because their weighted
+         * luminance is low.
          */
         fun isFireDark(): Boolean =
-            maxOf(averageRed, averageGreen, averageBlue) <= FIRE_MAX_CHANNEL
+            averageLuminance <= FIRE_MAX_LUMINANCE &&
+                maxOf(averageRed, averageGreen, averageBlue) <= FIRE_MAX_CHANNEL
 
         fun isMeaningfulChangeFrom(reference: ColorSample): Boolean {
             val channelDelta = maxOf(
@@ -134,7 +137,7 @@ class DetectionEngine(
         }
 
         State.ARMED -> {
-            // White holds ARMED. Any non-black color is neutral and also holds ARMED.
+            // White holds ARMED. Any non-dark color is neutral and also holds ARMED.
             // Only black/near-black is FIRE, and the first such frame fires immediately.
             if (sample.isFireDark()) {
                 fire(nowMs)
@@ -145,7 +148,7 @@ class DetectionEngine(
         }
 
         State.WAITING_REARM -> {
-            // Rearming remains white-only.
+            // Rearming remains white-only and always requires three consecutive frames.
             whiteFrames = if (sample.isArmingWhite()) whiteFrames + 1 else 0
             val whiteReady = whiteRearmEnabled && whiteFrames >= REQUIRED_REARM_FRAMES
             val delayReady = !rearmDelayEnabled || nowMs - firedAtMs >= rearmSeconds * 1000L
@@ -196,8 +199,10 @@ class DetectionEngine(
         const val MIN_CHANGE_CHROMA_RISE = 24
         const val MIN_CHANGE_WHITE_COVERAGE_DROP = 0.35f
 
-        /** Inclusive upper bound for the darkest RGB channel maximum considered FIRE. */
-        const val FIRE_MAX_CHANNEL = 72
+        /** Inclusive luminance ceiling for a DARK/FIRE sample. */
+        const val FIRE_MAX_LUMINANCE = 72
+        /** Near-black guard: saturated colors above this channel value remain NEUTRAL. */
+        const val FIRE_MAX_CHANNEL = 96
 
         const val REQUIRED_ARM_FRAMES = 3
         const val REQUIRED_CHANGE_FRAMES = 1
@@ -206,6 +211,6 @@ class DetectionEngine(
 
         const val MANUAL_REARM_MENU_SETTLE_MS = 35L
         const val MANUAL_REARM_TIMEOUT_MS = 500L
-        const val MANUAL_REARM_WHITE_FRAMES = 2
+        const val MANUAL_REARM_WHITE_FRAMES = 3
     }
 }

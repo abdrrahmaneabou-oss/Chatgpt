@@ -275,9 +275,9 @@ class DetectionEngine(
         var i = 0
         while (i < baselineProbeCount) {
             val packed = sample.probeAt(i)
-            probeRedSum[i] += (packed ushr 16) and 0xff
-            probeGreenSum[i] += (packed ushr 8) and 0xff
-            probeBlueSum[i] += packed and 0xff
+            probeRedSum[i] = probeRedSum[i] + (((packed ushr 16) and 0xff).toLong())
+            probeGreenSum[i] = probeGreenSum[i] + (((packed ushr 8) and 0xff).toLong())
+            probeBlueSum[i] = probeBlueSum[i] + ((packed and 0xff).toLong())
             i++
         }
     }

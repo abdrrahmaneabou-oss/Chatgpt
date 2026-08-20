@@ -1,6 +1,7 @@
 package com.pixeltrigger.app.input
 
 import android.os.SystemClock
+import com.pixeltrigger.app.profiling.AppLatencyProfiler
 import java.util.concurrent.atomic.AtomicLong
 
 /** Converts each detector FIRE directly into one tap request. */
@@ -20,6 +21,7 @@ class TapCoordinator(
         detectionStartNs: Long = 0L,
         fireDecisionNs: Long = 0L,
     ): TapResult {
+        val cadence = AppLatencyProfiler.snapshotForFire()
         val request = TapRequest(
             triggerId = ids.incrementAndGet(),
             x = x,
@@ -33,6 +35,8 @@ class TapCoordinator(
             sampleEndNs = sampleEndNs,
             detectionStartNs = detectionStartNs,
             fireDecisionNs = fireDecisionNs,
+            samplerEntryGapNs = cadence.samplerEntryGapNs,
+            imageTimestampGapNs = cadence.imageTimestampGapNs,
         )
         return when (val result = engine.tap(request)) {
             is TapResult.Rejected -> TapResult.Failed(

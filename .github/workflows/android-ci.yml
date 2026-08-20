@@ -44,7 +44,40 @@ jobs:
           gradle-version: '8.7'
 
       - name: Clean, test, and build debug APK
-        run: gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace
+        id: gradle_build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace 2>&1 | tee /tmp/pixeltrigger-gradle.log
+
+      - name: Persist compiler failure diagnostics
+        if: steps.gradle_build.outcome == 'failure'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs
+          {
+            echo '# PixelTrigger CI BUILD FAILURE'
+            echo
+            echo "- Source commit: $SOURCE_SHA"
+            echo "- UTC: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo
+            echo '```text'
+            tail -n 260 /tmp/pixeltrigger-gradle.log
+            echo '```'
+          } > docs/CI_BUILD_FAILURE.log
+          git config user.name 'PixelTrigger Android CI'
+          git config user.email 'actions@users.noreply.github.com'
+          git add docs/CI_BUILD_FAILURE.log
+          if ! git diff --cached --quiet; then
+            git commit -m "ci: record build failure from $SOURCE_SHA"
+            git push origin HEAD:pixeltrigger-v3-shizuku
+          fi
+
+      - name: Stop after compiler failure
+        if: steps.gradle_build.outcome == 'failure'
+        run: exit 1
 
       - name: Publish verified APK to branch
         shell: bash
@@ -81,6 +114,7 @@ jobs:
             echo '- Requested DOWN/UP separation: ~1 ms after DOWN returns'
             echo "- APK SHA-256: $DIRECT_SHA"
           } > docs/DIRECT_FIRE_STATUS.md
+          rm -f docs/CI_BUILD_FAILURE.log
 
           git config user.name 'PixelTrigger Android CI'
           git config user.email 'actions@users.noreply.github.com'
@@ -89,6 +123,7 @@ jobs:
                   dist/PixelTrigger-v3-direct-1ms-debug.apk \
                   dist/PixelTrigger-v3-direct-1ms-debug.apk.sha256 \
                   docs/DIRECT_FIRE_STATUS.md
+          git add -u docs/CI_BUILD_FAILURE.log || true
           if ! git diff --cached --quiet; then
             git commit -m "build: publish verified ns-profiler APK from $SOURCE_SHA"
             git push origin HEAD:pixeltrigger-v3-shizuku

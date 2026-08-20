@@ -1,0 +1,11 @@
+# PixelTrigger v4 PixelProbe status
+- Unit tests: PASS
+- APK build: PASS (clean --rerun-tasks)
+- Source commit: 184cc627b14f751e2135c8f7c718108bff811386
+- Monitor diameter: exactly 0.3 mm
+- Sampler: maximum 5 fixed direct RGB probe points inside 0.3 mm ellipse
+- Arming: exactly 3 consecutive WHITE frames
+- FIRE: first changed frame reaching v4 quorum
+- Input: one oneway Shizuku AIDL -> Nubia virtualTouchEvent
+- No Accessibility fallback / retry / second DOWN
+- APK SHA-256: e6a6b1bc6b4edf2fba1afb681cf47ec0e3b49893216b276e4661d2764be0a22a

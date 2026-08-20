@@ -1,21 +1,11 @@
 # PixelTrigger v4 PixelProbe status
-
 - Unit tests: PASS
 - APK build: PASS (clean --rerun-tasks)
-- Source commit: 4735022d7684529ce66a58c5703db8aaf2b646ac
+- Source commit: c102d50da586b2585f1f0263f8a81c30300e602c
 - Monitor diameter: exactly 0.3 mm
-- Capture: MediaProjection -> VirtualDisplay -> ImageReader RGBA_8888
-- ImageReader: maxImages=2 + acquireLatestImage + immediate close via use{}
-- Capture callback: dedicated HandlerThread, detector runs directly on callback thread
-- v4 sampler: fixed geometric probe, maximum 5 direct RGB points
-- Probe layout: center + cardinal points that remain inside the 0.3 mm ellipse
-- No per-frame circle scan / Bitmap / crop allocation / image copy in PixelSampler
+- Sampler: maximum 5 fixed direct RGB probe points inside 0.3 mm ellipse
 - Arming: exactly 3 consecutive WHITE frames
-- Armed baseline: per-probe RGB values averaged over those 3 WHITE frames
-- FIRE: first frame with quorum departure from armed baseline
-- Quorum: 3/5, 2/3-4, or 1/1-2 depending on capture-pixel availability
-- Per-point departure: channel delta >= 18 or luminance drop >= 12 or white classification lost
-- FIRE transport: ShizukuTapEngine.fireFast -> one oneway AIDL -> Nubia virtualTouchEvent
-- No Accessibility fallback / retry / backup tap / second DOWN
-- Requested DOWN -> UP contact separation remains ~1 ms after DOWN returns
-- APK SHA-256: d512ce56fbb913b06385b775bc943d43cb3043e33a7df501ccd86c0fb3c95729
+- FIRE: first changed frame reaching v4 quorum
+- Input: one oneway Shizuku AIDL -> Nubia virtualTouchEvent
+- No Accessibility fallback / retry / second DOWN
+- APK SHA-256: 67ed056a2aa3795493269dbd0176be49f7983b7253a83fec0af955a6f1911a10

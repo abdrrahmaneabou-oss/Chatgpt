@@ -16,7 +16,9 @@ class DetectionEngineBaselineTest {
     ) = DetectionEngine.ColorSample(r, g, b, whiteRatio, darkRatio, luminance, chroma)
 
     private val white = sample(240, 240, 240, 0.90f, 0.00f, 240, 0)
-    private val holdingWhite = sample(225, 225, 225, 0.40f, 0.00f, 220, 5)
+    private val tinyJitterWhite = sample(226, 226, 226, 0.90f, 0.00f, 226, 2)
+    private val predictiveFade = sample(220, 220, 220, 0.90f, 0.00f, 220, 2)
+    private val predictiveCoverageDrop = sample(238, 238, 238, 0.70f, 0.00f, 238, 1)
     private val mixedWhite = sample(205, 205, 205, 0.55f, 0.00f, 182, 65)
     private val neutralBlue = sample(45, 170, 205, 0.02f, 0.00f, 150, 160)
     private val neutralGray = sample(120, 120, 120, 0.05f, 0.00f, 120, 0)
@@ -31,11 +33,24 @@ class DetectionEngineBaselineTest {
         assertEquals(DetectionEngine.State.ARMED, e.state)
     }
 
-    @Test fun holdingWhiteDoesNotFireAfterArming() {
+    @Test fun averagedBaselineIgnoresSmallWhiteJitter() {
         val e = DetectionEngine()
         e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
-        assertTrue(e.processSample(holdingWhite, 4) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(tinyJitterWhite, 4) is DetectionEngine.Event.None)
         assertEquals(DetectionEngine.State.ARMED, e.state)
+    }
+
+    @Test fun uniformWhiteWeakeningFiresBeforeHardHoldingThreshold() {
+        val e = DetectionEngine()
+        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
+        assertTrue(e.processSample(predictiveFade, 4) is DetectionEngine.Event.Fired)
+        assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
+    }
+
+    @Test fun oneMeaningfulCoverageStepFiresImmediately() {
+        val e = DetectionEngine()
+        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
+        assertTrue(e.processSample(predictiveCoverageDrop, 4) is DetectionEngine.Event.Fired)
     }
 
     @Test fun firstNonWhiteFrameFiresImmediately() {
@@ -71,6 +86,13 @@ class DetectionEngineBaselineTest {
         assertTrue(e.processSample(mixedWhite, 3) is DetectionEngine.Event.Armed)
     }
 
+    @Test fun stableMixedWhiteDoesNotSelfFireAfterArming() {
+        val e = DetectionEngine()
+        e.processSample(mixedWhite, 1); e.processSample(mixedWhite, 2); e.processSample(mixedWhite, 3)
+        assertTrue(e.processSample(mixedWhite, 4) is DetectionEngine.Event.None)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
+    }
+
     @Test fun nonWhiteBreaksConsecutiveWhiteSequenceBeforeArming() {
         val e = DetectionEngine()
         e.processSample(white, 1)
@@ -102,6 +124,8 @@ class DetectionEngineBaselineTest {
         assertEquals(0.3f, DetectionEngine.SENSOR_DIAMETER_MM)
         assertEquals(0.50f, DetectionEngine.ARM_WHITE_COVERAGE)
         assertEquals(0.35f, DetectionEngine.HOLD_WHITE_COVERAGE)
+        assertEquals(0.15f, DetectionEngine.PREDICTIVE_WHITE_COVERAGE_DROP)
+        assertEquals(18, DetectionEngine.PREDICTIVE_LUMINANCE_DROP)
         assertEquals(190, DetectionEngine.WHITE_PIXEL_LUMINANCE)
         assertEquals(170, DetectionEngine.WHITE_PIXEL_MIN_CHANNEL)
         assertEquals(60, DetectionEngine.WHITE_PIXEL_MAX_CHROMA)

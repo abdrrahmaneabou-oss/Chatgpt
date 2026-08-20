@@ -16,7 +16,9 @@ interface IShizukuInputService {
         long detectionStartNs,
         long fireDecisionNs,
         long requestCreatedNs,
-        long binderSubmitStartNs
+        long binderSubmitStartNs,
+        long samplerEntryGapNs,
+        long imageTimestampGapNs
     ) = 4;
     long getLastDownNs() = 5;
     long getLastUpNs() = 6;

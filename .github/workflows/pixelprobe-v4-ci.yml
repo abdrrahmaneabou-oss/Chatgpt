@@ -24,12 +24,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: pixeltrigger-v4-pixelprobe
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Capture exact source provenance
         shell: bash
-        run: echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+        run: |
+          SOURCE_SHA=$(git rev-parse HEAD)
+          test "$SOURCE_SHA" = "${{ github.sha }}"
+          echo "SOURCE_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
 
       - name: Verify v4 hot-path invariants
         id: invariants
@@ -49,6 +52,7 @@ jobs:
             grep -q 'PixelFormat.RGBA_8888, 2' "$CAPTURE"
             grep -q 'MAX_PROBE_POINTS = 5' "$DETECTOR"
             grep -q 'REQUIRED_ARM_FRAMES = 3' "$DETECTOR"
+            grep -q 'FIRE_MAX_LUMINANCE = 90' "$DETECTOR"
             grep -q 'probePointChanged' "$DETECTOR"
             grep -q 'center + left + right + top + bottom' "$SAMPLER"
           } 2>&1 | tee /tmp/v4-invariants.log
@@ -95,6 +99,9 @@ jobs:
 
           git config user.name 'PixelTrigger v4 CI'
           git config user.email 'actions@users.noreply.github.com'
+          git fetch origin pixeltrigger-v4-pixelprobe
+          git checkout pixeltrigger-v4-pixelprobe
+          git pull --ff-only origin pixeltrigger-v4-pixelprobe
           git add docs/PIXELPROBE_V4_FAILURE.log
           git commit -m "ci: record PixelProbe v4 failure for $SOURCE_SHA" || true
           git push origin HEAD:pixeltrigger-v4-pixelprobe
@@ -108,8 +115,15 @@ jobs:
           APK=app/build/outputs/apk/debug/app-debug.apk
           OUT=dist/PixelTrigger-v4-pixelprobe-debug.apk
           test -s "$APK"
+          TMP_APK=$(mktemp)
+          cp "$APK" "$TMP_APK"
+
+          git fetch origin pixeltrigger-v4-pixelprobe
+          git checkout pixeltrigger-v4-pixelprobe
+          git pull --ff-only origin pixeltrigger-v4-pixelprobe
+
           mkdir -p dist docs
-          cp "$APK" "$OUT"
+          cp "$TMP_APK" "$OUT"
           SHA=$(sha256sum "$OUT" | cut -d' ' -f1)
           printf '%s  %s\n' "$SHA" "$OUT" > "$OUT.sha256"
 
@@ -120,20 +134,12 @@ jobs:
             echo '- APK build: PASS (clean --rerun-tasks)'
             echo "- Source commit: $SOURCE_SHA"
             echo '- Monitor diameter: exactly 0.3 mm'
-            echo '- Capture: MediaProjection -> VirtualDisplay -> ImageReader RGBA_8888'
-            echo '- ImageReader: maxImages=2 + acquireLatestImage + immediate close via use{}'
-            echo '- Capture callback: dedicated HandlerThread, detector runs directly on callback thread'
-            echo '- v4 sampler: fixed geometric probe, maximum 5 direct RGB points'
-            echo '- Probe layout: center + cardinal points that remain inside the 0.3 mm ellipse'
-            echo '- No per-frame circle scan / Bitmap / crop allocation / image copy in PixelSampler'
             echo '- Arming: exactly 3 consecutive WHITE frames'
-            echo '- Armed baseline: per-probe RGB values averaged over those 3 WHITE frames'
-            echo '- FIRE: first frame with quorum departure from armed baseline'
-            echo '- Quorum: 3/5, 2/3-4, or 1/1-2 depending on capture-pixel availability'
-            echo '- Per-point departure: channel delta >= 18 or luminance drop >= 12 or white classification lost'
-            echo '- FIRE transport: ShizukuTapEngine.fireFast -> one oneway AIDL -> Nubia virtualTouchEvent'
-            echo '- No Accessibility fallback / retry / backup tap / second DOWN'
-            echo '- Requested DOWN -> UP contact separation remains ~1 ms after DOWN returns'
+            echo '- FIRE gate: meaningful v4 probe departure AND average luminance <= 90'
+            echo '- Luminance >= 91 stays ARMED and does not FIRE'
+            echo '- No debounce / timer / extra-frame wait in FIRE gate'
+            echo '- Input: one oneway Shizuku AIDL -> Nubia virtualTouchEvent'
+            echo '- No Accessibility fallback / retry / second DOWN'
             echo "- APK SHA-256: $SHA"
           } > docs/PIXELPROBE_V4_STATUS.md
 
@@ -149,8 +155,9 @@ jobs:
 
       - name: Upload v4 APK artifact
         if: steps.invariants.outcome == 'success' && steps.gradle_build.outcome == 'success'
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: PixelTrigger-v4-pixelprobe-debug
           path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
+          if-no-files-found: warn

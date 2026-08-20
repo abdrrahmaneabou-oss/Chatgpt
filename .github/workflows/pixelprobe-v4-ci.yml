@@ -1,0 +1,113 @@
+name: PixelTrigger v4 PixelProbe CI
+
+on:
+  push:
+    branches: [pixeltrigger-v4-pixelprobe]
+    paths:
+      - 'app/**'
+      - 'build.gradle.kts'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/pixelprobe-v4-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pixeltrigger-v4-pixelprobe
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: pixeltrigger-v4-pixelprobe
+          fetch-depth: 0
+
+      - name: Capture exact source provenance
+        shell: bash
+        run: echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      - name: Verify v4 hot-path invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          CAPTURE=app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt
+          SAMPLER=app/src/main/java/com/pixeltrigger/app/engine/PixelSampler.kt
+          DETECTOR=app/src/main/java/com/pixeltrigger/app/engine/DetectionEngine.kt
+
+          grep -q 'MONITOR_DIAMETER_MM = 0.3f' "$CAPTURE"
+          grep -q 'acquireLatestImage()' "$CAPTURE"
+          ! grep -q 'acquireNextImage()' "$CAPTURE"
+          grep -q 'PixelFormat.RGBA_8888, 2' "$CAPTURE"
+          grep -q 'MAX_PROBE_POINTS = 5' "$DETECTOR"
+          grep -q 'REQUIRED_ARM_FRAMES = 3' "$DETECTOR"
+          grep -q 'probePointChanged' "$DETECTOR"
+          grep -q 'center + left + right + top + bottom' "$SAMPLER"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Clean, test, and build v4 debug APK
+        shell: bash
+        run: gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace
+
+      - name: Publish verified v4 PixelProbe APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          OUT=dist/PixelTrigger-v4-pixelprobe-debug.apk
+          test -s "$APK"
+          mkdir -p dist docs
+          cp "$APK" "$OUT"
+          SHA=$(sha256sum "$OUT" | cut -d' ' -f1)
+          printf '%s  %s\n' "$SHA" "$OUT" > "$OUT.sha256"
+
+          {
+            echo '# PixelTrigger v4 PixelProbe status'
+            echo
+            echo '- Unit tests: PASS'
+            echo '- APK build: PASS (clean --rerun-tasks)'
+            echo "- Source commit: $SOURCE_SHA"
+            echo '- Monitor diameter: exactly 0.3 mm'
+            echo '- Capture: MediaProjection -> VirtualDisplay -> ImageReader RGBA_8888'
+            echo '- ImageReader: maxImages=2 + acquireLatestImage + immediate close via use{}'
+            echo '- Capture callback: dedicated HandlerThread, detector runs directly on callback thread'
+            echo '- v4 sampler: fixed geometric probe, maximum 5 direct RGB points'
+            echo '- Probe layout: center + cardinal points that remain inside the 0.3 mm ellipse'
+            echo '- No per-frame circle scan / Bitmap / crop allocation / image copy in PixelSampler'
+            echo '- Arming: exactly 3 consecutive WHITE frames'
+            echo '- Armed baseline: per-probe RGB values averaged over those 3 WHITE frames'
+            echo '- FIRE: first frame with quorum departure from armed baseline'
+            echo '- Quorum: 3/5, 2/3-4, or 1/1-2 depending on capture-pixel availability'
+            echo '- Per-point departure: channel delta >= 18 or luminance drop >= 12 or white classification lost'
+            echo '- FIRE transport: ShizukuTapEngine.fireFast -> one oneway AIDL -> Nubia virtualTouchEvent'
+            echo '- No Accessibility fallback / retry / backup tap / second DOWN'
+            echo '- Requested DOWN -> UP contact separation remains ~1 ms after DOWN returns'
+            echo "- APK SHA-256: $SHA"
+          } > docs/PIXELPROBE_V4_STATUS.md
+
+          git config user.name 'PixelTrigger v4 CI'
+          git config user.email 'actions@users.noreply.github.com'
+          git add "$OUT" "$OUT.sha256" docs/PIXELPROBE_V4_STATUS.md
+          if ! git diff --cached --quiet; then
+            git commit -m "build: publish PixelProbe v4 APK from $SOURCE_SHA"
+            git push origin HEAD:pixeltrigger-v4-pixelprobe
+          fi
+
+      - name: Upload v4 APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PixelTrigger-v4-pixelprobe-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

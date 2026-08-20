@@ -23,6 +23,13 @@ jobs:
           ref: pixeltrigger-v3-shizuku
           fetch-depth: 0
 
+      - name: Capture source provenance
+        id: source
+        shell: bash
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -32,35 +39,38 @@ jobs:
         with:
           gradle-version: '8.7'
 
-      - name: Unit tests
-        run: gradle --no-daemon :app:testDebugUnitTest --stacktrace
+      - name: Clean, test, and build debug APK
+        run: gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace
 
-      - name: Build debug APK
-        run: gradle --no-daemon :app:assembleDebug --stacktrace
-
-      - name: Publish tested APK to branch
+      - name: Publish verified APK to branch
         shell: bash
         run: |
           set -euo pipefail
+          APK=app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
           mkdir -p dist docs
-          cp app/build/outputs/apk/debug/app-debug.apk dist/PixelTrigger-v3-debug.apk
-          cp app/build/outputs/apk/debug/app-debug.apk dist/PixelTrigger-v3-direct-1ms-debug.apk
-          sha256sum dist/PixelTrigger-v3-debug.apk > dist/PixelTrigger-v3-debug.apk.sha256
-          sha256sum dist/PixelTrigger-v3-direct-1ms-debug.apk > dist/PixelTrigger-v3-direct-1ms-debug.apk.sha256
+          cp "$APK" dist/PixelTrigger-v3-debug.apk
+          cp "$APK" dist/PixelTrigger-v3-direct-1ms-debug.apk
+          DEBUG_SHA=$(sha256sum dist/PixelTrigger-v3-debug.apk | cut -d' ' -f1)
+          DIRECT_SHA=$(sha256sum dist/PixelTrigger-v3-direct-1ms-debug.apk | cut -d' ' -f1)
+          test "$DEBUG_SHA" = "$DIRECT_SHA"
+          printf '%s  %s\n' "$DEBUG_SHA" 'dist/PixelTrigger-v3-debug.apk' > dist/PixelTrigger-v3-debug.apk.sha256
+          printf '%s  %s\n' "$DIRECT_SHA" 'dist/PixelTrigger-v3-direct-1ms-debug.apk' > dist/PixelTrigger-v3-direct-1ms-debug.apk.sha256
           {
             echo '# PixelTrigger direct-fire CI status'
             echo
             echo '- Unit tests: PASS'
-            echo '- APK build: PASS'
-            echo '- Arming: original v2.12 white thresholds + 3 consecutive white frames'
-            echo '- FIRE: only DARK/near-black after ARMED (luminance threshold + near-black channel guard)'
+            echo '- APK build: PASS (clean --rerun-tasks)'
+            echo "- Source commit: $SOURCE_SHA"
+            echo '- Monitor diameter: 0.3 mm'
+            echo '- Arming: 3 consecutive WHITE frames; input readiness never resets detection state'
+            echo '- FIRE: first DARK/near-black frame after ARMED, only when Nubia/Shizuku input is ready'
+            echo '- Input unavailable while DARK: stays ARMED; FIRE is not consumed'
             echo '- NEUTRAL: stays ARMED and never arms from zero'
             echo '- Tap backend: Shizuku shell -> Nubia InputManager.virtualTouchEvent -> InputReader/NubiaGamepad'
-            echo '- Virtual pointer params: keyCode=-4, DOWN=0, UP=2, mode=1, gamepadId=-2'
-            echo '- Accessibility fallback: none'
+            echo '- Exactly one tap: one DOWN + one UP; no retry / backup press / Accessibility fallback'
             echo '- Requested DOWN/UP separation: ~1 ms after DOWN returns'
-            echo '- Generic InputManager.injectInputEvent: not used'
-            echo "- APK SHA-256: $(sha256sum dist/PixelTrigger-v3-debug.apk | cut -d' ' -f1)"
+            echo "- APK SHA-256: $DIRECT_SHA"
           } > docs/DIRECT_FIRE_STATUS.md
 
           git config user.name 'PixelTrigger Android CI'
@@ -71,7 +81,7 @@ jobs:
                   dist/PixelTrigger-v3-direct-1ms-debug.apk.sha256 \
                   docs/DIRECT_FIRE_STATUS.md
           if ! git diff --cached --quiet; then
-            git commit -m 'build: publish tested direct-fire APK'
+            git commit -m "build: publish verified direct-fire APK from $SOURCE_SHA"
             git push origin HEAD:pixeltrigger-v3-shizuku
           fi
 

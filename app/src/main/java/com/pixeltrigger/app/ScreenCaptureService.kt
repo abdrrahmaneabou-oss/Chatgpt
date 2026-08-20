@@ -40,7 +40,6 @@ import com.pixeltrigger.app.engine.DetectionEngine
 import com.pixeltrigger.app.engine.PixelSampler
 import com.pixeltrigger.app.input.InputCapability
 import com.pixeltrigger.app.input.ShizukuTapEngine
-import com.pixeltrigger.app.input.TapCoordinator
 import com.pixeltrigger.app.ui.SensorOverlayView
 import com.pixeltrigger.app.ui.SensorStatus
 import com.pixeltrigger.app.ui.TargetOverlayView
@@ -67,10 +66,6 @@ class ScreenCaptureService : Service() {
     private var captureHeight = 0
     private var captureDensityDpi = 0
 
-    @Volatile private var lastFrameAgeNs = 0L
-    @Volatile private var lastSamplerNs = 0L
-    @Volatile private var lastFireSubmitNs = 0L
-
     private var sensorView: SensorOverlayView? = null
     private var sensorParams: WindowManager.LayoutParams? = null
     private var sensorVisibleDiameter = 1
@@ -94,7 +89,6 @@ class ScreenCaptureService : Service() {
 
     private val detectionEngine = DetectionEngine()
     private lateinit var tapEngine: ShizukuTapEngine
-    private lateinit var tapCoordinator: TapCoordinator
 
     private val displayListener = object : DisplayManager.DisplayListener {
         override fun onDisplayAdded(displayId: Int) = Unit
@@ -116,7 +110,6 @@ class ScreenCaptureService : Service() {
         detectionEngine.rearmSeconds = preferences.getInt(KEY_REARM_SECONDS, 10).coerceIn(5, 60)
 
         tapEngine = ShizukuTapEngine(this)
-        tapCoordinator = TapCoordinator(tapEngine)
         tapEngine.connect()
 
         (getSystemService(DISPLAY_SERVICE) as DisplayManager).registerDisplayListener(displayListener, mainHandler)
@@ -193,12 +186,6 @@ class ScreenCaptureService : Service() {
         }
 
     private fun processImage(image: Image) {
-        val processStartedNs = SystemClock.elapsedRealtimeNanos()
-        val imageTimestampNs = image.timestamp
-        if (imageTimestampNs > 0L && processStartedNs >= imageTimestampNs) {
-            lastFrameAgeNs = processStartedNs - imageTimestampNs
-        }
-
         if (!engineEnabled || circleEditMode) return
 
         // Input readiness is UI/input state only. It must never erase detector state.
@@ -229,22 +216,17 @@ class ScreenCaptureService : Service() {
         val radiusX = max(0.5f, crop.width() * screenRadius / screenWidth)
         val radiusY = max(0.5f, crop.height() * screenRadius / screenHeight)
 
-        val samplerStartedNs = SystemClock.elapsedRealtimeNanos()
         val sample = PixelSampler.sampleCircularRegion(image, centerX, centerY, radiusX, radiusY) ?: return
-        lastSamplerNs = SystemClock.elapsedRealtimeNanos() - samplerStartedNs
 
-        // Re-check immediately before the state transition. WHITE detection/arming is
-        // never gated. DARK only consumes FIRE when the one-way Nubia path is ready.
-        val fireAllowedNow = tapEngine.isReady()
-        when (val event = detectionEngine.processSample(sample, SystemClock.elapsedRealtime(), fireAllowed = fireAllowedNow)) {
+        // No profiler timestamps, no second readiness read, and no diagnostic gate in
+        // the detector hot path. Predictive white-loss can submit FIRE immediately.
+        when (val event = detectionEngine.processSample(sample, SystemClock.elapsedRealtime())) {
             is DetectionEngine.Event.Armed,
             is DetectionEngine.Event.Rearmed,
             is DetectionEngine.Event.ManualRearmed ->
-                updateSensorStatus(if (fireAllowedNow) SensorStatus.ARMED else SensorStatus.INPUT_NOT_READY)
+                updateSensorStatus(if (inputReady) SensorStatus.ARMED else SensorStatus.INPUT_NOT_READY)
             is DetectionEngine.Event.Fired -> {
-                val submitStartedNs = SystemClock.elapsedRealtimeNanos()
                 executeTapImmediately()
-                lastFireSubmitNs = SystemClock.elapsedRealtimeNanos() - submitStartedNs
                 updateSensorStatus(SensorStatus.FIRED)
             }
             is DetectionEngine.Event.ManualRearmTimedOut -> showMessage("لم يتم التسليح: اللون الأبيض غير موجود")
@@ -258,7 +240,7 @@ class ScreenCaptureService : Service() {
         val target = targetParams ?: return
         val tapX = target.x + targetTouchSize / 2f
         val tapY = target.y + targetTouchSize / 2f
-        tapCoordinator.fire(tapX, tapY, displayId = 0)
+        tapEngine.fireFast(tapX, tapY, displayId = 0)
     }
 
     private fun createOverlays() {
@@ -586,10 +568,8 @@ class ScreenCaptureService : Service() {
         attachMenuDrag(header, root, lp)
     }
 
-    private fun captureStatsText(): String {
-        fun ms(ns: Long): String = if (ns <= 0L) "n/a" else String.format(java.util.Locale.US, "%.3fms", ns / 1_000_000.0)
-        return "capture=${captureWidth}x${captureHeight} (${(CAPTURE_SCALE * 100).roundToInt()}%); frameAge=${ms(lastFrameAgeNs)}; sampler=${ms(lastSamplerNs)}; fireSubmit=${ms(lastFireSubmitNs)}"
-    }
+    private fun captureStatsText(): String =
+        "capture=${captureWidth}x${captureHeight} (${(CAPTURE_SCALE * 100).roundToInt()}%); predictive white-loss; profiler=OFF"
 
     private fun attachMenuDrag(handle: View, panel: View, params: WindowManager.LayoutParams) {
         var grabOffsetX = 0f

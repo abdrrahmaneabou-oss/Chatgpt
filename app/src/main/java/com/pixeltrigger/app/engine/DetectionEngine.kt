@@ -1,11 +1,14 @@
 package com.pixeltrigger.app.engine
 
 /**
- * White-only arming/rearming with coverage-based near-black FIRE detection.
+ * White-only arming/rearming with immediate FIRE on white disappearance.
  *
- * Detection is deliberately independent from the input backend. Once ARMED,
- * the first DARK frame produces FIRE immediately; backend diagnostics are never
- * allowed to delay the detector state transition.
+ * After exactly three WHITE frames the engine is ARMED. From that point, the
+ * first frame that no longer satisfies the tolerant holding-white condition
+ * produces FIRE immediately. It does not wait for black/near-black.
+ *
+ * Detection is deliberately independent from input-backend diagnostics so a
+ * transient readiness change cannot add visible latency before FIRE.
  */
 class DetectionEngine(
     var whiteRearmEnabled: Boolean = true,
@@ -67,9 +70,8 @@ class DetectionEngine(
     private var manualRearmWhiteFrames: Int = 0
 
     /**
-     * [fireAllowed] is retained only for source compatibility with callers/tests from
-     * the previous build. It is intentionally ignored: backend readiness must never
-     * hold DARK in ARMED and create visible latency.
+     * [fireAllowed] is retained only for source compatibility with the previous
+     * build and is intentionally ignored. Backend readiness must not delay FIRE.
      */
     fun processSample(
         sample: ColorSample,
@@ -131,7 +133,8 @@ class DetectionEngine(
         }
 
         State.ARMED -> {
-            if (sample.isFireDark()) {
+            // The trigger event is disappearance of white, not arrival of black.
+            if (!sample.isHoldingWhite()) {
                 fire(nowMs)
                 Event.Fired(nowMs)
             } else Event.None
@@ -188,11 +191,11 @@ class DetectionEngine(
         const val MIN_CHANGE_CHROMA_RISE = 24
         const val MIN_CHANGE_WHITE_COVERAGE_DROP = 0.35f
 
+        // Retained for diagnostics only; FIRE no longer waits for DARK.
         const val DARK_PIXEL_MAX_LUMINANCE = 88
         const val DARK_PIXEL_MAX_CHANNEL = 118
         const val DARK_PIXEL_MAX_CHROMA = 72
         const val FIRE_DARK_COVERAGE = 0.45f
-
         const val FIRE_MAX_LUMINANCE = DARK_PIXEL_MAX_LUMINANCE
         const val FIRE_MAX_CHROMA = DARK_PIXEL_MAX_CHROMA
 

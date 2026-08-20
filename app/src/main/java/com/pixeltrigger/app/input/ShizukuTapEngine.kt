@@ -6,7 +6,11 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.IBinder
 import android.os.SystemClock
+import com.pixeltrigger.app.profiling.AppLatencyProfiler
 import rikka.shizuku.Shizuku
+import java.util.Locale
+import kotlin.math.ceil
+import kotlin.math.min
 
 /** App-side, no-root Shizuku tap backend. No Accessibility fallback is used silently. */
 class ShizukuTapEngine(private val context: Context) : TapEngine {
@@ -17,6 +21,8 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
     @Volatile private var lastSubmitTriggerId: Long = 0L
     @Volatile private var lastBinderSubmitStartNs: Long = 0L
     @Volatile private var lastBinderSubmitReturnNs: Long = 0L
+    @Volatile private var submitSamples: Long = 0L
+    private val submitDurationsNs = LongArray(SUBMIT_HISTORY_CAPACITY) { INVALID_NS }
 
     @Volatile var capability: InputCapability = InputCapability.DISCONNECTED
         private set
@@ -28,8 +34,8 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
     )
         .processNameSuffix("pixeltrigger_input")
         .daemon(true)
-        .tag("pixeltrigger-input-v10-ns-trace")
-        .version(10)
+        .tag("pixeltrigger-input-v11-clock-safe-profiler")
+        .version(11)
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
@@ -76,10 +82,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         }
     }
 
-    /**
-     * Slow capability/diagnostic path. Once STATUS_SAFE has warmed the vendor path,
-     * a transient diagnostic Binder failure must not de-arm the hot path.
-     */
+    /** Slow capability/diagnostic path. Never used as a synchronous FIRE gate. */
     fun refreshCapability(): InputCapability {
         val service = remote ?: run {
             hotPathReady = false
@@ -107,11 +110,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
     /** Volatile-memory check only; no synchronous probe in the FIRE path. */
     fun isReady(): Boolean = remote != null && hotPathReady
 
-    /**
-     * Hot path: exactly one one-way Binder transaction. The extra timestamps are plain
-     * primitive longs; there is no logging, formatting, allocation-heavy statistics or
-     * synchronous diagnostic read on FIRE.
-     */
+    /** Exactly one one-way AIDL submission. No retries, logs, formatting, or diagnostic reads. */
     override fun tap(request: TapRequest): TapResult {
         val acceptedAt = SystemClock.elapsedRealtimeNanos()
         val service = remote
@@ -138,9 +137,12 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
                 request.fireDecisionNs,
                 request.requestedAtNs,
                 submitStartNs,
+                request.samplerEntryGapNs,
+                request.imageTimestampGapNs,
             )
             val submitReturnNs = SystemClock.elapsedRealtimeNanos()
             lastBinderSubmitReturnNs = submitReturnNs
+            recordSubmitDuration(submitReturnNs - submitStartNs)
             TapResult.Completed(
                 triggerId = request.triggerId,
                 acceptedAtNs = acceptedAt,
@@ -148,45 +150,55 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
                 upSentAtNs = 0L,
             )
         }.getOrElse {
-            lastBinderSubmitReturnNs = SystemClock.elapsedRealtimeNanos()
+            val submitReturnNs = SystemClock.elapsedRealtimeNanos()
+            lastBinderSubmitReturnNs = submitReturnNs
+            recordSubmitDuration(submitReturnNs - submitStartNs)
             TapResult.Failed(request.triggerId, acceptedAt, "binder submit error: ${it.message ?: it.javaClass.simpleName}")
         }
     }
 
-    /** Slow diagnostics path, never called from FIRE. */
-    fun latencyDetail(): String {
-        val service = remote ?: return "latency: disconnected"
-        val localNs = (lastBinderSubmitReturnNs - lastBinderSubmitStartNs).takeIf { it >= 0L } ?: -1L
-        val local = if (localNs >= 0L) String.format(java.util.Locale.US, "appAidlSubmit=%.3fµs", localNs / 1_000.0)
-        else "appAidlSubmit=n/a"
-        val remoteDetail = runCatching { service.latencyDetail }.getOrDefault("latency: unavailable")
-        return "$local; $remoteDetail"
+    private fun recordSubmitDuration(ns: Long) {
+        if (ns < 0L) return
+        val sequence = submitSamples
+        submitDurationsNs[(sequence % SUBMIT_HISTORY_CAPACITY).toInt()] = ns
+        submitSamples = sequence + 1L
     }
 
-    /** Full last-shot + rolling latency report. Only used from menu/diagnostics UI. */
+    /** Compact UI status; diagnostic read only. */
+    fun latencyDetail(): String {
+        val service = remote ?: return "latency: disconnected"
+        val localNs = safeDelta(lastBinderSubmitStartNs, lastBinderSubmitReturnNs)
+        val remoteDetail = runCatching { service.latencyDetail }.getOrDefault("latency: unavailable")
+        return "app one-way call=${fmtCompact(localNs)}; $remoteDetail"
+    }
+
+    /** Full report. Formatting/statistics happen only when the user opens diagnostics. */
     fun latencyTraceReport(): String {
         val service = remote ?: return "Latency trace: Shizuku UserService disconnected"
-        val localSubmitNs = if (lastBinderSubmitReturnNs >= lastBinderSubmitStartNs && lastBinderSubmitStartNs > 0L) {
-            lastBinderSubmitReturnNs - lastBinderSubmitStartNs
-        } else -1L
-        val localLine = if (localSubmitNs >= 0L) {
-            String.format(
-                java.util.Locale.US,
-                "APP AIDL enqueue return: %.3f µs  (trigger #%d)",
-                localSubmitNs / 1_000.0,
-                lastSubmitTriggerId,
-            )
-        } else "APP AIDL enqueue return: n/a"
+        val localNs = safeDelta(lastBinderSubmitStartNs, lastBinderSubmitReturnNs)
+        val localStats = submitStats()
         val backend = runCatching { service.latencyTraceReport }.getOrElse {
             "Trace read failed: ${it.message ?: it.javaClass.simpleName}"
         }
-        return "$localLine\n$backend"
+        return buildString(5000) {
+            append("🧪 PixelTrigger PROFESSIONAL LATENCY LAB\n")
+            append("No absolute Image.timestamp ↔ elapsedRealtimeNanos subtraction is permitted.\n\n")
+            append(AppLatencyProfiler.report()).append('\n')
+            append("APP → AIDL SUBMISSION\n")
+            append("Latest one-way AIDL call return: ").append(fmt(localNs))
+                .append(" (trigger #").append(lastSubmitTriggerId).append(")\n")
+            append("Rolling one-way call: ").append(localStats).append("\n\n")
+            append(backend)
+        }
     }
 
     fun clearLatencyTraceHistory() {
         lastSubmitTriggerId = 0L
         lastBinderSubmitStartNs = 0L
         lastBinderSubmitReturnNs = 0L
+        submitSamples = 0L
+        submitDurationsNs.fill(INVALID_NS)
+        AppLatencyProfiler.clear()
         remote?.let { service -> runCatching { service.clearLatencyTraceHistory() } }
     }
 
@@ -195,5 +207,40 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         remote = null
         hotPathReady = false
         capability = InputCapability.DISCONNECTED
+    }
+
+    private fun submitStats(): String {
+        val count = min(submitSamples, SUBMIT_HISTORY_CAPACITY.toLong()).toInt()
+        if (count <= 0) return "n/a"
+        val values = submitDurationsNs.filter { it >= 0L }.take(count).sorted()
+        if (values.isEmpty()) return "n/a"
+        fun pct(p: Double): Long {
+            val rank = ceil(p * values.size).toInt().coerceIn(1, values.size)
+            return values[rank - 1]
+        }
+        return "P50=${fmtCompact(pct(0.50))} P90=${fmtCompact(pct(0.90))} " +
+            "P95=${fmtCompact(pct(0.95))} P99=${fmtCompact(pct(0.99))} MAX=${fmtCompact(values.last())}"
+    }
+
+    private fun safeDelta(startNs: Long, endNs: Long): Long =
+        if (startNs > 0L && endNs >= startNs) endNs - startNs else INVALID_NS
+
+    private fun fmt(ns: Long): String = when {
+        ns < 0L -> "n/a"
+        ns < 1_000L -> "$ns ns"
+        ns < 1_000_000L -> String.format(Locale.US, "%,d ns | %.3f µs", ns, ns / 1_000.0)
+        else -> String.format(Locale.US, "%,d ns | %.3f µs | %.6f ms", ns, ns / 1_000.0, ns / 1_000_000.0)
+    }
+
+    private fun fmtCompact(ns: Long): String = when {
+        ns < 0L -> "n/a"
+        ns < 1_000L -> "${ns}ns"
+        ns < 1_000_000L -> String.format(Locale.US, "%.3fµs", ns / 1_000.0)
+        else -> String.format(Locale.US, "%.3fms", ns / 1_000_000.0)
+    }
+
+    companion object {
+        private const val SUBMIT_HISTORY_CAPACITY = 128
+        private const val INVALID_NS = -1L
     }
 }

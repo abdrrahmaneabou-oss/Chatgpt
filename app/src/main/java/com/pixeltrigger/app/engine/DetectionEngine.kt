@@ -7,12 +7,9 @@ import kotlin.math.abs
  *
  * Arming remains exactly three consecutive WHITE frames. During those three
  * frames the detector builds a stable baseline for the fixed 0.3 mm probe.
- * Once ARMED, the primary decision is no longer a whole-circle percentage
- * calculation: the first frame in which a majority of the fixed probe points
- * meaningfully depart from their armed baseline fires immediately.
- *
- * Aggregate white-loss logic is retained only as a compatibility/failsafe path
- * for samples that do not contain v4 fixed-probe data.
+ * Once ARMED, FIRE requires BOTH a meaningful departure from that baseline and
+ * a dark current sample (average luminance <= 75). Light/non-white colors keep
+ * the engine ARMED and never add a debounce, timer, or extra-frame wait.
  */
 class DetectionEngine(
     var whiteRearmEnabled: Boolean = true,
@@ -39,6 +36,7 @@ class DetectionEngine(
         fun isArmingWhite(): Boolean = whiteRatio >= ARM_WHITE_COVERAGE
         fun isHoldingWhite(): Boolean = whiteRatio >= HOLD_WHITE_COVERAGE
         fun isFireDark(): Boolean = darkRatio >= FIRE_DARK_COVERAGE
+        fun isFireLuminance(): Boolean = averageLuminance <= FIRE_MAX_LUMINANCE
 
         fun probeAt(index: Int): Int = when (index) {
             0 -> probe0
@@ -237,7 +235,11 @@ class DetectionEngine(
                 reference != null && sample.isPredictiveWhiteLossFrom(reference)
             }
 
-            if (!sample.isHoldingWhite() || changed) {
+            // Hot gate: the current frame itself must both depart from the armed
+            // white baseline and be dark enough. This is one integer comparison
+            // on averageLuminance already computed by PixelSampler; no timer,
+            // debounce, extra frame, or 35%-white fallback can delay/force FIRE.
+            if (changed && sample.isFireLuminance()) {
                 fire(nowMs)
                 Event.Fired(nowMs)
             } else Event.None
@@ -257,8 +259,6 @@ class DetectionEngine(
 
     private fun appendWhite(sample: ColorSample) {
         if (whiteFrames > 0 && baselineProbeCount != sample.probeCount) {
-            // Geometry/stride changed mid-arm: restart the three-frame baseline
-            // rather than averaging different physical points together.
             resetWhiteSequence()
         }
         if (whiteFrames == 0) baselineProbeCount = sample.probeCount.coerceIn(0, MAX_PROBE_POINTS)
@@ -356,14 +356,11 @@ class DetectionEngine(
         const val MIN_SAMPLE_PIXELS = 1
 
         const val ARM_WHITE_COVERAGE = 0.50f
-        const val HOLD_WHITE_COVERAGE = 0.35f
+        const val HOLD_WHITE_COVERAGE = 0.35f // retained for compatibility only; not a FIRE gate
 
-        // v4 fixed-probe departure thresholds. Majority quorum protects against
-        // one noisy edge sample while still firing on the first changed frame.
         const val PROBE_CHANNEL_DELTA = 18
         const val PROBE_LUMINANCE_DROP = 12
 
-        // Compatibility predictor for non-v4 samples/tests.
         const val PREDICTIVE_WHITE_COVERAGE_DROP = 0.15f
         const val PREDICTIVE_LUMINANCE_DROP = 18
         const val PREDICTIVE_MIN_CHANNEL_DROP = 14
@@ -380,11 +377,15 @@ class DetectionEngine(
         const val MIN_CHANGE_CHROMA_RISE = 24
         const val MIN_CHANGE_WHITE_COVERAGE_DROP = 0.35f
 
+        // Exact user-selected maximum luminance for FIRE. Anything above 75 is
+        // treated as too light and leaves the detector ARMED.
+        const val FIRE_MAX_LUMINANCE = 75
+
+        // Legacy/detection diagnostics retained; FIRE no longer depends on them.
         const val DARK_PIXEL_MAX_LUMINANCE = 88
         const val DARK_PIXEL_MAX_CHANNEL = 118
         const val DARK_PIXEL_MAX_CHROMA = 72
         const val FIRE_DARK_COVERAGE = 0.45f
-        const val FIRE_MAX_LUMINANCE = DARK_PIXEL_MAX_LUMINANCE
         const val FIRE_MAX_CHROMA = DARK_PIXEL_MAX_CHROMA
 
         const val REQUIRED_ARM_FRAMES = 3

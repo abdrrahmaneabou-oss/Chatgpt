@@ -13,6 +13,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
     override val name: String = "shizuku-redmagic-nubia-inputreader-ultralow"
 
     @Volatile private var remote: IShizukuInputService? = null
+    @Volatile private var hotPathReady: Boolean = false
     @Volatile var capability: InputCapability = InputCapability.DISCONNECTED
         private set
     @Volatile var capabilityDetail: String = "Shizuku not connected"
@@ -22,8 +23,6 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         ComponentName(context.packageName, ShizukuInputUserService::class.java.name),
     )
         .processNameSuffix("pixeltrigger_input")
-        // Keep the already-warmed shell process alive so FIRE never depends on a
-        // just-created UserService. This improves single-shot reliability without retries.
         .daemon(true)
         .tag("pixeltrigger-input-v9-single-shot")
         .version(9)
@@ -36,6 +35,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
 
         override fun onServiceDisconnected(name: ComponentName?) {
             remote = null
+            hotPathReady = false
             capability = InputCapability.DISCONNECTED
             capabilityDetail = "Shizuku UserService disconnected"
         }
@@ -43,17 +43,20 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
 
     fun connect(): Boolean {
         if (!Shizuku.pingBinder()) {
+            hotPathReady = false
             capability = InputCapability.DISCONNECTED
             capabilityDetail = "Start Shizuku with Wireless debugging/ADB"
             return false
         }
         val uid = runCatching { Shizuku.getUid() }.getOrDefault(-1)
         if (uid != ShizukuInputUserService.SHELL_UID) {
+            hotPathReady = false
             capability = InputCapability.ROOT_REJECTED
             capabilityDetail = "No-root policy: Shizuku must run as ADB shell UID 2000 (got $uid)"
             return false
         }
         if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
+            hotPathReady = false
             capability = InputCapability.PERMISSION_REQUIRED
             capabilityDetail = "Shizuku permission required"
             return false
@@ -62,20 +65,27 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
             Shizuku.bindUserService(args, connection)
             true
         }.getOrElse {
+            hotPathReady = false
             capability = InputCapability.DISCONNECTED
             capabilityDetail = "bind failed: ${it.message ?: it.javaClass.simpleName}"
             false
         }
     }
 
+    /**
+     * Slow capability/diagnostic path. Once STATUS_SAFE has warmed the vendor path,
+     * a transient diagnostic Binder failure must not de-arm the hot path. Only a real
+     * service disconnect or an explicit non-safe capability result clears the latch.
+     */
     fun refreshCapability(): InputCapability {
         val service = remote ?: run {
+            hotPathReady = false
             capability = InputCapability.DISCONNECTED
             return capability
         }
         val code = runCatching { service.probeCapability() }.getOrElse {
-            capabilityDetail = "probe failed: ${it.message ?: it.javaClass.simpleName}"
-            capability = InputCapability.DISCONNECTED
+            capabilityDetail = "probe failed (hot path preserved): ${it.message ?: it.javaClass.simpleName}"
+            if (!hotPathReady) capability = InputCapability.DISCONNECTED
             return capability
         }
         capabilityDetail = runCatching { service.capabilityDetail }.getOrDefault("status=$code")
@@ -87,15 +97,12 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
             ShizukuInputUserService.STATUS_CONCURRENT_TOUCH_UNSAFE -> InputCapability.CONCURRENT_TOUCH_UNSAFE
             else -> InputCapability.DISCONNECTED
         }
+        hotPathReady = capability == InputCapability.CONCURRENT_TOUCH_SAFE
         return capability
     }
 
-    /**
-     * FIRE is enabled only after the UserService has completed capability probing and
-     * warmed the Nubia injector. Mere Binder connection is not enough.
-     */
-    fun isReady(): Boolean =
-        remote != null && capability == InputCapability.CONCURRENT_TOUCH_SAFE
+    /** No synchronous probe is performed here. This is a volatile-memory check only. */
+    fun isReady(): Boolean = remote != null && hotPathReady
 
     /**
      * Hot path: exactly one one-way Binder transaction. No retry, no backup DOWN,
@@ -105,7 +112,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         val acceptedAt = SystemClock.elapsedRealtimeNanos()
         val service = remote
             ?: return TapResult.Failed(request.triggerId, acceptedAt, "Shizuku input service disconnected")
-        if (capability != InputCapability.CONCURRENT_TOUCH_SAFE) {
+        if (!hotPathReady) {
             return TapResult.Failed(request.triggerId, acceptedAt, "Nubia input backend not warmed/ready")
         }
 
@@ -123,7 +130,6 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
                 upSentAtNs = 0L,
             )
         }.getOrElse {
-            // Deliberately do not retry: one FIRE must never become two taps.
             TapResult.Failed(request.triggerId, acceptedAt, "binder submit error: ${it.message ?: it.javaClass.simpleName}")
         }
     }
@@ -137,6 +143,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
     fun disconnect() {
         runCatching { Shizuku.unbindUserService(args, connection, false) }
         remote = null
+        hotPathReady = false
         capability = InputCapability.DISCONNECTED
     }
 }

@@ -1,14 +1,16 @@
 package com.pixeltrigger.app.engine
 
 /**
- * White-only arming/rearming with immediate FIRE on white disappearance.
+ * White-only arming/rearming with predictive FIRE on the first real weakening
+ * of the armed white signal.
  *
- * After exactly three WHITE frames the engine is ARMED. From that point, the
- * first frame that no longer satisfies the tolerant holding-white condition
- * produces FIRE immediately. It does not wait for black/near-black.
+ * Exactly three consecutive white frames are averaged into a stable baseline.
+ * Once ARMED, FIRE happens on either:
+ *  - a clear first-frame weakening relative to that baseline, or
+ *  - the legacy hard fallback where holding-white coverage is lost.
  *
- * Detection is deliberately independent from input-backend diagnostics so a
- * transient readiness change cannot add visible latency before FIRE.
+ * This intentionally predicts disappearance before waiting for the sampled
+ * region to fall all the way below the old 35% holding-white threshold.
  */
 class DetectionEngine(
     var whiteRearmEnabled: Boolean = true,
@@ -30,19 +32,28 @@ class DetectionEngine(
         fun isHoldingWhite(): Boolean = whiteRatio >= HOLD_WHITE_COVERAGE
         fun isFireDark(): Boolean = darkRatio >= FIRE_DARK_COVERAGE
 
-        fun isMeaningfulChangeFrom(reference: ColorSample): Boolean {
-            val channelDelta = maxOf(
-                kotlin.math.abs(averageRed - reference.averageRed),
-                kotlin.math.abs(averageGreen - reference.averageGreen),
-                kotlin.math.abs(averageBlue - reference.averageBlue),
-            )
+        /**
+         * Aggressive but noise-aware predictor. One meaningful coverage step is
+         * enough to FIRE immediately. Uniform dimming must cross both luminance
+         * and channel-drop gates so tiny capture jitter does not false-fire.
+         */
+        fun isPredictiveWhiteLossFrom(reference: ColorSample): Boolean {
+            val coverageDrop = reference.whiteRatio - whiteRatio
+            if (coverageDrop >= PREDICTIVE_WHITE_COVERAGE_DROP) return true
+
+            val referenceMin = minOf(reference.averageRed, reference.averageGreen, reference.averageBlue)
+            val currentMin = minOf(averageRed, averageGreen, averageBlue)
+            val minChannelDrop = referenceMin - currentMin
             val luminanceDrop = reference.averageLuminance - averageLuminance
             val chromaRise = averageChroma - reference.averageChroma
-            val coverageDrop = reference.whiteRatio - whiteRatio
-            return channelDelta >= MIN_CHANGE_CHANNEL_DELTA ||
-                luminanceDrop >= MIN_CHANGE_LUMINANCE_DROP ||
-                chromaRise >= MIN_CHANGE_CHROMA_RISE ||
-                coverageDrop >= MIN_CHANGE_WHITE_COVERAGE_DROP
+
+            if (
+                luminanceDrop >= PREDICTIVE_LUMINANCE_DROP &&
+                minChannelDrop >= PREDICTIVE_MIN_CHANNEL_DROP
+            ) return true
+
+            return chromaRise >= PREDICTIVE_CHROMA_RISE &&
+                luminanceDrop >= PREDICTIVE_COLOR_LUMINANCE_DROP
         }
     }
 
@@ -66,13 +77,18 @@ class DetectionEngine(
         private set
 
     private var whiteFrames: Int = 0
-    private var changedFrames: Int = 0
     private var manualRearmWhiteFrames: Int = 0
 
-    /**
-     * [fireAllowed] is retained only for source compatibility with the previous
-     * build and is intentionally ignored. Backend readiness must not delay FIRE.
-     */
+    // Consecutive-white baseline accumulator. It is touched only while arming or
+    // rearming, never in the steady ARMED hot path.
+    private var whiteRedSum = 0L
+    private var whiteGreenSum = 0L
+    private var whiteBlueSum = 0L
+    private var whiteRatioSum = 0f
+    private var whiteDarkRatioSum = 0f
+    private var whiteLuminanceSum = 0L
+    private var whiteChromaSum = 0L
+
     fun processSample(
         sample: ColorSample,
         nowMs: Long,
@@ -96,8 +112,7 @@ class DetectionEngine(
         state = State.WAITING_FOR_WHITE
         clearOneTimeRearmRequest()
         armedWhiteSample = null
-        whiteFrames = 0
-        changedFrames = 0
+        resetWhiteSequence()
     }
 
     private fun processOneTimeRearmOverride(sample: ColorSample, nowMs: Long): Event {
@@ -125,37 +140,81 @@ class DetectionEngine(
 
     private fun updateTriggerState(sample: ColorSample, nowMs: Long): Event = when (state) {
         State.WAITING_FOR_WHITE -> {
-            whiteFrames = if (sample.isArmingWhite()) whiteFrames + 1 else 0
-            if (whiteFrames >= REQUIRED_ARM_FRAMES) {
-                arm(sample)
-                Event.Armed(sample)
-            } else Event.None
+            if (sample.isArmingWhite()) {
+                appendWhite(sample)
+                if (whiteFrames >= REQUIRED_ARM_FRAMES) {
+                    val baseline = averagedWhiteBaseline()
+                    arm(baseline)
+                    Event.Armed(baseline)
+                } else Event.None
+            } else {
+                resetWhiteSequence()
+                Event.None
+            }
         }
 
         State.ARMED -> {
-            // The trigger event is disappearance of white, not arrival of black.
-            if (!sample.isHoldingWhite()) {
+            val reference = armedWhiteSample
+            if (
+                !sample.isHoldingWhite() ||
+                (reference != null && sample.isPredictiveWhiteLossFrom(reference))
+            ) {
                 fire(nowMs)
                 Event.Fired(nowMs)
             } else Event.None
         }
 
         State.WAITING_REARM -> {
-            whiteFrames = if (sample.isArmingWhite()) whiteFrames + 1 else 0
+            if (sample.isArmingWhite()) appendWhite(sample) else resetWhiteSequence()
             val whiteReady = whiteRearmEnabled && whiteFrames >= REQUIRED_REARM_FRAMES
             val delayReady = !rearmDelayEnabled || nowMs - firedAtMs >= rearmSeconds * 1000L
             if (whiteReady && delayReady) {
-                arm(sample)
-                Event.Rearmed(sample)
+                val baseline = averagedWhiteBaseline()
+                arm(baseline)
+                Event.Rearmed(baseline)
             } else Event.None
         }
+    }
+
+    private fun appendWhite(sample: ColorSample) {
+        whiteFrames++
+        whiteRedSum += sample.averageRed
+        whiteGreenSum += sample.averageGreen
+        whiteBlueSum += sample.averageBlue
+        whiteRatioSum += sample.whiteRatio
+        whiteDarkRatioSum += sample.darkRatio
+        whiteLuminanceSum += sample.averageLuminance
+        whiteChromaSum += sample.averageChroma
+    }
+
+    private fun averagedWhiteBaseline(): ColorSample {
+        val count = whiteFrames.coerceAtLeast(1)
+        return ColorSample(
+            averageRed = (whiteRedSum / count).toInt(),
+            averageGreen = (whiteGreenSum / count).toInt(),
+            averageBlue = (whiteBlueSum / count).toInt(),
+            whiteRatio = whiteRatioSum / count.toFloat(),
+            darkRatio = whiteDarkRatioSum / count.toFloat(),
+            averageLuminance = (whiteLuminanceSum / count).toInt(),
+            averageChroma = (whiteChromaSum / count).toInt(),
+        )
+    }
+
+    private fun resetWhiteSequence() {
+        whiteFrames = 0
+        whiteRedSum = 0L
+        whiteGreenSum = 0L
+        whiteBlueSum = 0L
+        whiteRatioSum = 0f
+        whiteDarkRatioSum = 0f
+        whiteLuminanceSum = 0L
+        whiteChromaSum = 0L
     }
 
     private fun arm(sample: ColorSample) {
         state = State.ARMED
         armedWhiteSample = sample
-        whiteFrames = 0
-        changedFrames = 0
+        resetWhiteSequence()
     }
 
     private fun fire(nowMs: Long) {
@@ -163,8 +222,7 @@ class DetectionEngine(
         clearOneTimeRearmRequest()
         armedWhiteSample = null
         firedAtMs = nowMs
-        whiteFrames = 0
-        changedFrames = 0
+        resetWhiteSequence()
     }
 
     private fun clearOneTimeRearmRequest() {
@@ -181,6 +239,14 @@ class DetectionEngine(
         const val ARM_WHITE_COVERAGE = 0.50f
         const val HOLD_WHITE_COVERAGE = 0.35f
 
+        // Predictive white-loss gates. These are relative to the averaged three-
+        // frame arming baseline, so they can FIRE before the hard 35% fallback.
+        const val PREDICTIVE_WHITE_COVERAGE_DROP = 0.15f
+        const val PREDICTIVE_LUMINANCE_DROP = 18
+        const val PREDICTIVE_MIN_CHANNEL_DROP = 14
+        const val PREDICTIVE_CHROMA_RISE = 24
+        const val PREDICTIVE_COLOR_LUMINANCE_DROP = 8
+
         const val ARM_WHITE_AVERAGE_LUMINANCE = 195
         const val ARM_WHITE_AVERAGE_CHROMA = 50
         const val HOLD_WHITE_AVERAGE_LUMINANCE = 170
@@ -191,7 +257,6 @@ class DetectionEngine(
         const val MIN_CHANGE_CHROMA_RISE = 24
         const val MIN_CHANGE_WHITE_COVERAGE_DROP = 0.35f
 
-        // Retained for diagnostics only; FIRE no longer waits for DARK.
         const val DARK_PIXEL_MAX_LUMINANCE = 88
         const val DARK_PIXEL_MAX_CHANNEL = 118
         const val DARK_PIXEL_MAX_CHROMA = 72

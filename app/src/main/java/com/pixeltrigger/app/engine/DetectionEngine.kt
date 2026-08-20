@@ -3,9 +3,9 @@ package com.pixeltrigger.app.engine
 /**
  * White-only arming/rearming with coverage-based near-black FIRE detection.
  *
- * Detection state is intentionally independent from input-backend readiness:
- * WHITE may arm while Shizuku is temporarily unavailable, and DARK must not
- * consume the one FIRE until the input path is actually ready.
+ * Detection is deliberately independent from the input backend. Once ARMED,
+ * the first DARK frame produces FIRE immediately; backend diagnostics are never
+ * allowed to delay the detector state transition.
  */
 class DetectionEngine(
     var whiteRearmEnabled: Boolean = true,
@@ -24,9 +24,7 @@ class DetectionEngine(
         val averageChroma: Int,
     ) {
         fun isArmingWhite(): Boolean = whiteRatio >= ARM_WHITE_COVERAGE
-
         fun isHoldingWhite(): Boolean = whiteRatio >= HOLD_WHITE_COVERAGE
-
         fun isFireDark(): Boolean = darkRatio >= FIRE_DARK_COVERAGE
 
         fun isMeaningfulChangeFrom(reference: ColorSample): Boolean {
@@ -69,16 +67,20 @@ class DetectionEngine(
     private var manualRearmWhiteFrames: Int = 0
 
     /**
-     * [fireAllowed] gates only the ARMED -> FIRE transition. It never gates WHITE
-     * detection or arming. When false, a DARK sample keeps the engine ARMED so the
-     * event cannot be lost merely because Shizuku readiness flickered for a frame.
+     * [fireAllowed] is retained only for source compatibility with callers/tests from
+     * the previous build. It is intentionally ignored: backend readiness must never
+     * hold DARK in ARMED and create visible latency.
      */
-    fun processSample(sample: ColorSample, nowMs: Long, fireAllowed: Boolean = true): Event {
+    fun processSample(
+        sample: ColorSample,
+        nowMs: Long,
+        @Suppress("UNUSED_PARAMETER") fireAllowed: Boolean = true,
+    ): Event {
         val manualEvent = processOneTimeRearmOverride(sample, nowMs)
         if (manualEvent is Event.ManualRearmed || manualEvent is Event.ManualRearmTimedOut) {
             return manualEvent
         }
-        return updateTriggerState(sample, nowMs, fireAllowed)
+        return updateTriggerState(sample, nowMs)
     }
 
     fun requestOneTimeRearmOverride(nowMs: Long): Boolean {
@@ -119,7 +121,7 @@ class DetectionEngine(
         return Event.None
     }
 
-    private fun updateTriggerState(sample: ColorSample, nowMs: Long, fireAllowed: Boolean): Event = when (state) {
+    private fun updateTriggerState(sample: ColorSample, nowMs: Long): Event = when (state) {
         State.WAITING_FOR_WHITE -> {
             whiteFrames = if (sample.isArmingWhite()) whiteFrames + 1 else 0
             if (whiteFrames >= REQUIRED_ARM_FRAMES) {
@@ -129,7 +131,7 @@ class DetectionEngine(
         }
 
         State.ARMED -> {
-            if (fireAllowed && sample.isFireDark()) {
+            if (sample.isFireDark()) {
                 fire(nowMs)
                 Event.Fired(nowMs)
             } else Event.None

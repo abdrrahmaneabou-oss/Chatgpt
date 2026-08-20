@@ -31,6 +31,7 @@ object AppLatencyProfiler {
     private const val INVALID_NS = -1L
     private const val FIFTY_MS_NS = 50_000_000L
     private const val TWO_MS_NS = 2_000_000L
+    private const val MIN_BASELINE_INTERVALS = 8
 
     private val frameGapNs = LongArray(CAPACITY) { INVALID_NS }
     private val imageGapNs = LongArray(CAPACITY) { INVALID_NS }
@@ -115,7 +116,12 @@ object AppLatencyProfiler {
         val samplerStats = stats(samplerValues)
 
         val baseline = frameStats?.p50 ?: INVALID_NS
-        val incidentThreshold = if (baseline > 0L) max(FIFTY_MS_NS, baseline * 4L) else FIFTY_MS_NS
+        val baselineStable = frameValues.size >= MIN_BASELINE_INTERVALS
+        val incidentThreshold = if (baselineStable && baseline > 0L) {
+            max(FIFTY_MS_NS, baseline * 4L)
+        } else {
+            FIFTY_MS_NS
+        }
         val incidentCount = frameValues.count { it >= incidentThreshold }
         val lastGap = lastCommittedFrameGapNs
         val lastImageGap = lastCommittedImageGapNs
@@ -125,13 +131,13 @@ object AppLatencyProfiler {
             lastGap < incidentThreshold -> "No large processed-frame cadence stall on the latest sampled frame."
             lastImageGap > 0L && abs(lastGap - lastImageGap) <= max(TWO_MS_NS, lastGap / 6L) ->
                 "Large gap is also present in consecutive Image.timestamp DELTAS. The stall is upstream of/inside capture production or frames were skipped before delivery."
-            lastImageGap > 0L && lastGap - lastImageGap >= max(FIFTY_MS_NS, baseline * 2L) ->
+            lastImageGap > 0L && lastGap - lastImageGap >= max(FIFTY_MS_NS, if (baseline > 0L) baseline * 2L else 0L) ->
                 "Large sampler-entry gap without a matching source timestamp delta. Suspect app delivery/scheduling/backpressure after image production."
             else ->
                 "Large processed-frame gap detected. Clock-safe data proves a stall before sampling; system tracing is required to attribute scheduler vs capture producer."
         }
 
-        return buildString(1800) {
+        return buildString(1900) {
             append("CAPTURE / FRAME CADENCE — clock-safe profiler\n")
             append("Clock A: elapsedRealtimeNanos = app/UserService comparable monotonic domain.\n")
             append("Clock B: Image.timestamp = FOREIGN/UNSYNCED absolute domain. Absolute frame age is intentionally NOT computed.\n")
@@ -144,7 +150,10 @@ object AppLatencyProfiler {
             append(statLine("sampler-entry interval", frameStats))
             append(statLine("source image Δtimestamp", imageStats))
             append(statLine("PixelSampler internal", samplerStats))
-            append("\nCadence incident threshold: ").append(fmt(incidentThreshold))
+            append("\nBaseline status: ")
+                .append(if (baselineStable) "STABLE (${frameValues.size} intervals)" else "WARMING (${frameValues.size}/$MIN_BASELINE_INTERVALS intervals)")
+                .append('\n')
+            append("Cadence incident threshold: ").append(fmt(incidentThreshold))
                 .append(" ; incidents in window: ").append(incidentCount).append('\n')
             append("CAPTURE VERDICT: ").append(verdict).append('\n')
         }

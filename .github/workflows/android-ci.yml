@@ -5,6 +5,7 @@ on:
     branches: [pixeltrigger-v3-shizuku]
     paths:
       - 'app/**'
+      - 'tools/**'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
       - 'gradle.properties'
@@ -26,6 +27,19 @@ jobs:
         with:
           ref: pixeltrigger-v3-shizuku
           fetch-depth: 0
+
+      - name: Enforce Professional Lab v2 UI/source invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/migrate_profiler_ui_v2.py
+          git config user.name 'PixelTrigger Android CI'
+          git config user.email 'actions@users.noreply.github.com'
+          git add app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt
+          if ! git diff --cached --quiet; then
+            git commit -m 'fix: remove invalid cross-clock frame-age UI'
+            git push origin HEAD:pixeltrigger-v3-shizuku
+          fi
 
       - name: Capture source provenance
         id: source
@@ -112,6 +126,7 @@ jobs:
             echo '- Arming: exactly 3 consecutive WHITE frames'
             echo '- FIRE: first frame after ARMED that is no longer holding-white; no wait for DARK/black'
             echo '- Profiler v2 invariant: absolute Image.timestamp is NEVER subtracted from elapsedRealtimeNanos'
+            echo '- Legacy quick-stat frameAge cross-clock subtraction: REMOVED from source/UI'
             echo '- Clock-safe app/UserService stages: SystemClock.elapsedRealtimeNanos only'
             echo '- Foreign Image.timestamp: consecutive delta only; absolute frame age intentionally unavailable'
             echo '- Capture cadence observer: PixelSampler entry interval on every processed frame, rolling 512 frames'

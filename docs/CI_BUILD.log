@@ -32,9 +32,9 @@ to this project's gradle.properties.
 > Task :app:generateDebugBuildConfig
 > Task :app:generateDebugResValues
 > Task :app:checkDebugAarMetadata
-> Task :app:compileDebugAidl
 > Task :app:mapDebugSourceSetPaths UP-TO-DATE
 > Task :app:generateDebugResources UP-TO-DATE
+> Task :app:compileDebugAidl
 > Task :app:packageDebugResources
 > Task :app:mergeDebugResources
 > Task :app:createDebugCompatibleScreenManifests
@@ -42,11 +42,11 @@ to this project's gradle.properties.
 > Task :app:parseDebugLocalResources
 > Task :app:processDebugMainManifest
 > Task :app:processDebugManifest
-> Task :app:preDebugUnitTestBuild UP-TO-DATE
-> Task :app:javaPreCompileDebug
-> Task :app:javaPreCompileDebugUnitTest
 > Task :app:processDebugManifestForPackage
+> Task :app:javaPreCompileDebug
+> Task :app:preDebugUnitTestBuild UP-TO-DATE
 > Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
+> Task :app:javaPreCompileDebugUnitTest
 > Task :app:mergeDebugShaders
 > Task :app:compileDebugShaders NO-SOURCE
 > Task :app:generateDebugAssets UP-TO-DATE
@@ -56,22 +56,18 @@ to this project's gradle.properties.
 > Task :app:processDebugResources
 > Task :app:checkDebugDuplicateClasses
 > Task :app:mergeDebugStartupProfile
+> Task :app:compileDebugKotlin
+> Task :app:mergeExtDexDebug
 > Task :app:mergeDebugJniLibFolders
-> Task :app:mergeDebugNativeLibs NO-SOURCE
 > Task :app:mergeLibDexDebug
+> Task :app:mergeDebugNativeLibs NO-SOURCE
 > Task :app:stripDebugDebugSymbols NO-SOURCE
 > Task :app:validateSigningDebug
 > Task :app:writeDebugAppMetadata
 > Task :app:writeDebugSigningConfigVersions
-> Task :app:mergeExtDexDebug
-
-> Task :app:compileDebugKotlin
-w: file:///home/runner/work/Chatgpt/Chatgpt/app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt:239:19 Variable 'event' is never used
-w: file:///home/runner/work/Chatgpt/Chatgpt/app/src/main/java/com/pixeltrigger/app/input/ShizukuInputUserService.kt:231:36 Type mismatch: inferred type is Any? but Any was expected
-
 > Task :app:compileDebugJavaWithJavac
-> Task :app:bundleDebugClassesToRuntimeJar
 > Task :app:bundleDebugClassesToCompileJar
+> Task :app:bundleDebugClassesToRuntimeJar
 > Task :app:processDebugJavaRes
 > Task :app:dexBuilderDebug
 > Task :app:mergeDebugGlobalSynthetics
@@ -84,7 +80,7 @@ w: file:///home/runner/work/Chatgpt/Chatgpt/app/src/main/java/com/pixeltrigger/a
 > Task :app:packageDebug
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
-gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1787201337034.json
+gradle/actions: Writing build results to /home/runner/work/_temp/.gradle-actions/build-results/build-1787203962196.json
 
-BUILD SUCCESSFUL in 1m 25s
+BUILD SUCCESSFUL in 1m 53s
 44 actionable tasks: 42 executed, 2 up-to-date

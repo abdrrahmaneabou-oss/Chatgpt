@@ -2,11 +2,12 @@
 
 - Unit tests: PASS
 - APK build: PASS (clean --rerun-tasks)
-- Source commit: e8ad00adccc6b3ac21019305d8b548ca82de57ad
+- Source commit: 7b834d9d0811805ee04d74cbe1dd2f22f7b6ab9b
 - Monitor diameter: 0.3 mm
 - Arming: exactly 3 consecutive WHITE frames
 - FIRE: first frame after ARMED that is no longer holding-white; no wait for DARK/black
 - Profiler v2 invariant: absolute Image.timestamp is NEVER subtracted from elapsedRealtimeNanos
+- Legacy quick-stat frameAge cross-clock subtraction: REMOVED from source/UI
 - Clock-safe app/UserService stages: SystemClock.elapsedRealtimeNanos only
 - Foreign Image.timestamp: consecutive delta only; absolute frame age intentionally unavailable
 - Capture cadence observer: PixelSampler entry interval on every processed frame, rolling 512 frames
@@ -20,4 +21,4 @@
 - Tap backend: Shizuku shell -> Nubia InputManager.virtualTouchEvent -> InputReader/NubiaGamepad
 - Exactly one tap: one DOWN + one UP; no retry / backup press / Accessibility fallback
 - Requested DOWN/UP separation: ~1 ms after DOWN returns
-- APK SHA-256: 34af22f1364a511e9b7d0e83ef19d968c85ad7bde519f2e44248661ca97e971d
+- APK SHA-256: 276cc74c6fd68a434a54cac315ab13fc12af9d33be9474bd7a18c3e5cf480209

@@ -64,88 +64,28 @@ class DetectionEngineBaselineTest {
     }
 
     private val white = sample(240, 240, 240, 0.90f, 0.00f, 240, 0)
-    private val tinyJitterWhite = sample(226, 226, 226, 0.90f, 0.00f, 226, 2)
-    private val predictiveFade = sample(220, 220, 220, 0.90f, 0.00f, 220, 2)
-    private val predictiveCoverageDrop = sample(238, 238, 238, 0.70f, 0.00f, 238, 1)
     private val mixedWhite = sample(205, 205, 205, 0.55f, 0.00f, 182, 65)
-    private val neutralBlue = sample(45, 170, 205, 0.02f, 0.00f, 150, 160)
-    private val neutralGray = sample(120, 120, 120, 0.05f, 0.00f, 120, 0)
+    private val lightBlue = sample(45, 170, 205, 0.02f, 0.00f, 150, 160)
+    private val mediumGray = sample(120, 120, 120, 0.05f, 0.00f, 120, 0)
     private val nearBlack = sample(19, 24, 29, 0.00f, 0.95f, 23, 10)
-    private val lowLuminanceSaturatedBlue = sample(0, 0, 150, 0.00f, 0.00f, 17, 150)
+    private val darkSaturatedBlue = sample(0, 0, 150, 0.00f, 0.00f, 17, 150)
+
+    private fun arm(e: DetectionEngine, s: DetectionEngine.ColorSample = white) {
+        assertTrue(e.processSample(s, 1) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(s, 2) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(s, 3) is DetectionEngine.Event.Armed)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
+    }
 
     @Test fun armingNeedsThreeConsecutiveWhiteFrames() {
-        val e = DetectionEngine()
-        assertTrue(e.processSample(white, 1) is DetectionEngine.Event.None)
-        assertTrue(e.processSample(white, 2) is DetectionEngine.Event.None)
-        assertTrue(e.processSample(white, 3) is DetectionEngine.Event.Armed)
-        assertEquals(DetectionEngine.State.ARMED, e.state)
-    }
-
-    @Test fun averagedBaselineIgnoresSmallWhiteJitter() {
-        val e = DetectionEngine()
-        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
-        assertTrue(e.processSample(tinyJitterWhite, 4) is DetectionEngine.Event.None)
-        assertEquals(DetectionEngine.State.ARMED, e.state)
-    }
-
-    @Test fun uniformWhiteWeakeningFiresBeforeHardHoldingThreshold() {
-        val e = DetectionEngine()
-        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
-        assertTrue(e.processSample(predictiveFade, 4) is DetectionEngine.Event.Fired)
-        assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
-    }
-
-    @Test fun oneMeaningfulCoverageStepFiresImmediately() {
-        val e = DetectionEngine()
-        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
-        assertTrue(e.processSample(predictiveCoverageDrop, 4) is DetectionEngine.Event.Fired)
-    }
-
-    @Test fun firstNonWhiteFrameFiresImmediately() {
-        val e = DetectionEngine()
-        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
-        assertTrue(e.processSample(neutralBlue, 4) is DetectionEngine.Event.Fired)
-        assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
-    }
-
-    @Test fun legacyReadinessFlagCannotDelayWhiteDisappearanceFire() {
-        val e = DetectionEngine()
-        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
-        assertTrue(e.processSample(neutralGray, 4, fireAllowed = false) is DetectionEngine.Event.Fired)
-        assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
-    }
-
-    @Test fun darkAlsoFiresOnFirstDisappearanceFrame() {
-        val e = DetectionEngine()
-        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
-        assertTrue(e.processSample(nearBlack, 4) is DetectionEngine.Event.Fired)
-    }
-
-    @Test fun saturatedBlueAlsoFiresBecauseWhiteHasDisappeared() {
-        val e = DetectionEngine()
-        e.processSample(white, 1); e.processSample(white, 2); e.processSample(white, 3)
-        assertTrue(e.processSample(lowLuminanceSaturatedBlue, 4) is DetectionEngine.Event.Fired)
-    }
-
-    @Test fun mixedWhiteStillArmsAfterThreeFrames() {
-        val e = DetectionEngine()
-        assertTrue(e.processSample(mixedWhite, 1) is DetectionEngine.Event.None)
-        assertTrue(e.processSample(mixedWhite, 2) is DetectionEngine.Event.None)
-        assertTrue(e.processSample(mixedWhite, 3) is DetectionEngine.Event.Armed)
-    }
-
-    @Test fun stableMixedWhiteDoesNotSelfFireAfterArming() {
-        val e = DetectionEngine()
-        e.processSample(mixedWhite, 1); e.processSample(mixedWhite, 2); e.processSample(mixedWhite, 3)
-        assertTrue(e.processSample(mixedWhite, 4) is DetectionEngine.Event.None)
-        assertEquals(DetectionEngine.State.ARMED, e.state)
+        arm(DetectionEngine())
     }
 
     @Test fun nonWhiteBreaksConsecutiveWhiteSequenceBeforeArming() {
         val e = DetectionEngine()
         e.processSample(white, 1)
         e.processSample(white, 2)
-        e.processSample(neutralBlue, 3)
+        e.processSample(lightBlue, 3)
         assertTrue(e.processSample(white, 4) is DetectionEngine.Event.None)
         assertTrue(e.processSample(white, 5) is DetectionEngine.Event.None)
         assertTrue(e.processSample(white, 6) is DetectionEngine.Event.Armed)
@@ -155,63 +95,122 @@ class DetectionEngineBaselineTest {
         val e = DetectionEngine()
         repeat(12) { index ->
             val s = when (index % 4) {
-                0 -> neutralBlue
-                1 -> neutralGray
+                0 -> lightBlue
+                1 -> mediumGray
                 2 -> nearBlack
-                else -> lowLuminanceSaturatedBlue
+                else -> darkSaturatedBlue
             }
             assertTrue(e.processSample(s, index.toLong()) is DetectionEngine.Event.None)
         }
         assertEquals(DetectionEngine.State.WAITING_FOR_WHITE, e.state)
     }
 
-    @Test fun v4FivePointProbeRequiresThreeChangedPoints() {
+    @Test fun lightColorChangeNeverFiresAndKeepsArmed() {
+        val e = DetectionEngine()
+        arm(e)
+        assertTrue(e.processSample(lightBlue, 4) is DetectionEngine.Event.None)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
+        assertTrue(e.processSample(mediumGray, 5) is DetectionEngine.Event.None)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
+    }
+
+    @Test fun oldThirtyFivePercentWhiteFallbackCannotFireLightColor() {
+        val e = DetectionEngine()
+        arm(e)
+        val changedButLight = sample(100, 100, 100, 0.00f, 0.00f, 100, 0)
+        assertTrue(e.processSample(changedButLight, 4) is DetectionEngine.Event.None)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
+    }
+
+    @Test fun darkFrameFiresImmediatelyAfterLightFramesWithoutRearming() {
+        val e = DetectionEngine()
+        arm(e)
+        assertTrue(e.processSample(lightBlue, 4) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(mediumGray, 5) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(nearBlack, 6) is DetectionEngine.Event.Fired)
+        assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
+    }
+
+    @Test fun luminance75IsAcceptedAnd76IsRejected() {
+        val reject = DetectionEngine()
+        arm(reject)
+        val l76 = sample(76, 76, 76, 0f, 0f, 76, 0)
+        assertTrue(reject.processSample(l76, 4) is DetectionEngine.Event.None)
+        assertEquals(DetectionEngine.State.ARMED, reject.state)
+
+        val accept = DetectionEngine()
+        arm(accept)
+        val l75 = sample(75, 75, 75, 0f, 0f, 75, 0)
+        assertTrue(accept.processSample(l75, 4) is DetectionEngine.Event.Fired)
+    }
+
+    @Test fun darkSaturatedColorCanFireBecauseGateIsDarknessNotHue() {
+        val e = DetectionEngine()
+        arm(e)
+        assertTrue(e.processSample(darkSaturatedBlue, 4) is DetectionEngine.Event.Fired)
+    }
+
+    @Test fun legacyReadinessFlagCannotDelayQualifiedDarkFire() {
+        val e = DetectionEngine()
+        arm(e)
+        assertTrue(e.processSample(nearBlack, 4, fireAllowed = false) is DetectionEngine.Event.Fired)
+    }
+
+    @Test fun mixedWhiteStillArmsAfterThreeFramesAndDoesNotSelfFire() {
+        val e = DetectionEngine()
+        arm(e, mixedWhite)
+        assertTrue(e.processSample(mixedWhite, 4) is DetectionEngine.Event.None)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
+    }
+
+    @Test fun v4FivePointProbeRequiresQuorumAndDarkness() {
         val e = DetectionEngine()
         val armedWhite = probeSample(rgb(240))
-        e.processSample(armedWhite, 1)
-        e.processSample(armedWhite, 2)
-        assertTrue(e.processSample(armedWhite, 3) is DetectionEngine.Event.Armed)
+        arm(e, armedWhite)
 
-        val onlyTwoChanged = probeSample(
-            p0 = rgb(205),
-            p1 = rgb(205),
+        val twoDarkThreeWhite = probeSample(
+            p0 = rgb(20),
+            p1 = rgb(20),
             p2 = rgb(240),
             p3 = rgb(240),
             p4 = rgb(240),
             whiteRatio = 0.60f,
         )
-        assertTrue(e.processSample(onlyTwoChanged, 4) is DetectionEngine.Event.None)
+        assertTrue(e.processSample(twoDarkThreeWhite, 4) is DetectionEngine.Event.None)
         assertEquals(DetectionEngine.State.ARMED, e.state)
 
-        val threeChanged = probeSample(
-            p0 = rgb(205),
-            p1 = rgb(205),
-            p2 = rgb(205),
+        val threeChangedButAverageTooLight = probeSample(
+            p0 = rgb(70),
+            p1 = rgb(70),
+            p2 = rgb(70),
             p3 = rgb(240),
             p4 = rgb(240),
             whiteRatio = 0.40f,
         )
-        assertTrue(e.processSample(threeChanged, 5) is DetectionEngine.Event.Fired)
+        assertTrue(e.processSample(threeChangedButAverageTooLight, 5) is DetectionEngine.Event.None)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
+
+        val fiveDark = probeSample(rgb(70), whiteRatio = 0f)
+        assertTrue(e.processSample(fiveDark, 6) is DetectionEngine.Event.Fired)
     }
 
-    @Test fun v4OneCapturePixelProbeCanFireImmediately() {
+    @Test fun v4OneCapturePixelProbeFiresOnFirstQualifiedDarkFrame() {
         val e = DetectionEngine()
         val armedWhite = probeSample(rgb(240), count = 1)
-        e.processSample(armedWhite, 1)
-        e.processSample(armedWhite, 2)
-        e.processSample(armedWhite, 3)
+        arm(e, armedWhite)
 
-        val changed = probeSample(rgb(210), count = 1, whiteRatio = 1.0f)
-        assertTrue(e.processSample(changed, 4) is DetectionEngine.Event.Fired)
+        val changedLight = probeSample(rgb(100), count = 1, whiteRatio = 0f)
+        assertTrue(e.processSample(changedLight, 4) is DetectionEngine.Event.None)
+        assertEquals(DetectionEngine.State.ARMED, e.state)
+
+        val changedDark = probeSample(rgb(75), count = 1, whiteRatio = 0f)
+        assertTrue(e.processSample(changedDark, 5) is DetectionEngine.Event.Fired)
     }
 
     @Test fun v4SmallPerPixelJitterDoesNotFire() {
         val e = DetectionEngine()
         val armedWhite = probeSample(rgb(240))
-        e.processSample(armedWhite, 1)
-        e.processSample(armedWhite, 2)
-        e.processSample(armedWhite, 3)
-
+        arm(e, armedWhite)
         val jitter = probeSample(rgb(231))
         assertTrue(e.processSample(jitter, 4) is DetectionEngine.Event.None)
         assertEquals(DetectionEngine.State.ARMED, e.state)
@@ -222,7 +221,6 @@ class DetectionEngineBaselineTest {
         e.processSample(probeSample(rgb(236)), 1)
         e.processSample(probeSample(rgb(240)), 2)
         assertTrue(e.processSample(probeSample(rgb(244)), 3) is DetectionEngine.Event.Armed)
-
         val baseline = e.armedWhiteSample!!
         assertEquals(rgb(240), baseline.probe0)
         assertEquals(5, baseline.probeCount)
@@ -237,10 +235,8 @@ class DetectionEngineBaselineTest {
         assertEquals(1, DetectionEngine.MIN_SAMPLE_PIXELS)
         assertEquals(18, DetectionEngine.PROBE_CHANNEL_DELTA)
         assertEquals(12, DetectionEngine.PROBE_LUMINANCE_DROP)
+        assertEquals(75, DetectionEngine.FIRE_MAX_LUMINANCE)
         assertEquals(0.50f, DetectionEngine.ARM_WHITE_COVERAGE)
-        assertEquals(0.35f, DetectionEngine.HOLD_WHITE_COVERAGE)
-        assertEquals(0.15f, DetectionEngine.PREDICTIVE_WHITE_COVERAGE_DROP)
-        assertEquals(18, DetectionEngine.PREDICTIVE_LUMINANCE_DROP)
         assertEquals(190, DetectionEngine.WHITE_PIXEL_LUMINANCE)
         assertEquals(170, DetectionEngine.WHITE_PIXEL_MIN_CHANNEL)
         assertEquals(60, DetectionEngine.WHITE_PIXEL_MAX_CHROMA)

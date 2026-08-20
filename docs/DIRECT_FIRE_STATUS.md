@@ -1,14 +1,19 @@
-# PixelTrigger immediate-fire CI status
+# PixelTrigger immediate-fire + ns-profiler CI status
 
 - Unit tests: PASS
 - APK build: PASS (clean --rerun-tasks)
-- Source commit: 6d9671e8e2a60a365d76e020e494a5b7fb3bf8f5
+- Source commit: fb504cd1206be4738057d8c0b672d193c9f564a2
 - Monitor diameter: 0.3 mm
 - Arming: exactly 3 consecutive WHITE frames
 - FIRE: first frame after ARMED that is no longer holding-white; no wait for DARK/black
 - Input readiness: diagnostics cannot delay the detector FIRE transition
 - Nubia hot path: readiness is latched after successful warm-up and cleared only on real disconnect / explicit unsafe result
+- Profiler clock: SystemClock.elapsedRealtimeNanos across app + Shizuku UserService
+- Profiler stages: frame/callback/sampling/detection/request/Binder queue/UserService dispatch/Nubia DOWN/hold/Nubia UP
+- Profiler history: last 64 shots with P50/P95/MAX and automatic largest-stage culprit
+- Profiler overhead policy: primitive timestamps only on FIRE; formatting/statistics only when diagnostics UI is opened
+- Shizuku UserService interface version: 10 (prevents stale v9 daemon reuse)
 - Tap backend: Shizuku shell -> Nubia InputManager.virtualTouchEvent -> InputReader/NubiaGamepad
 - Exactly one tap: one DOWN + one UP; no retry / backup press / Accessibility fallback
 - Requested DOWN/UP separation: ~1 ms after DOWN returns
-- APK SHA-256: d751774f4d13bd12be10ba38f7bd5d99fc7aa33102e92961a84e3a225d352924
+- APK SHA-256: de13a153daee3d9db03ee4df0c842fdd1f5292ab8502c15afb67c3b52bcc5ae8

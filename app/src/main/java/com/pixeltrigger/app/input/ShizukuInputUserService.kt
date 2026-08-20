@@ -7,29 +7,38 @@ import android.os.SystemClock
 import java.lang.reflect.Method
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.ceil
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
  * REDMAGIC/Nubia virtual-touch backend running inside the Shizuku UserService.
  *
- * FIRE remains a one-way request. Profiling stores only primitive nanosecond values
- * on the hot path. Formatting, sorting, percentiles, and culprit analysis happen
- * only when the diagnostics UI explicitly requests a report.
+ * Professional profiler rules:
+ * 1) elapsedRealtimeNanos timestamps may be compared across app/UserService processes.
+ * 2) Image.timestamp ABSOLUTE values are never compared with elapsedRealtimeNanos.
+ * 3) Image.timestamp is retained only as an intra-domain consecutive-frame delta.
+ * 4) Hot path stores primitive longs only. Formatting/sorting happens on diagnostics read.
+ * 5) Stage names describe what is actually observable; no kernel/scheduler attribution is invented.
  */
 class ShizukuInputUserService : IShizukuInputService.Stub {
     constructor()
     constructor(@Suppress("UNUSED_PARAMETER") context: android.content.Context)
 
     @Volatile private var lastTriggerId = 0L
-    @Volatile private var lastFrameTimestampNs = 0L
-    @Volatile private var lastCaptureCallbackNs = 0L
+    @Volatile private var lastRawImageTimestampNs = 0L // display only; NEVER used cross-clock.
+    @Volatile private var lastCaptureProcessStartNs = 0L
     @Volatile private var lastSampleStartNs = 0L
     @Volatile private var lastSampleEndNs = 0L
     @Volatile private var lastDetectionStartNs = 0L
     @Volatile private var lastFireDecisionNs = 0L
     @Volatile private var lastRequestCreatedNs = 0L
-    @Volatile private var lastBinderSubmitStartNs = 0L
+    @Volatile private var lastAidlSubmitStartNs = 0L
+    @Volatile private var lastSamplerEntryGapNs = INVALID_NS
+    @Volatile private var lastImageTimestampGapNs = INVALID_NS
     @Volatile private var lastRequestReceivedNs = 0L
+    @Volatile private var lastPriorityStartNs = 0L
+    @Volatile private var lastPriorityEndNs = 0L
     @Volatile private var lastDownCallStartNs = 0L
     @Volatile private var lastDownCallEndNs = 0L
     @Volatile private var lastUpCallStartNs = 0L
@@ -40,15 +49,23 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
 
     private val traceWriteIndex = AtomicInteger(0)
     private val traceSamples = AtomicInteger(0)
-    private val historyFrameToCallbackNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
+    private val historyTriggerId = LongArray(TRACE_CAPACITY)
+    private val historySamplerEntryGapNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
+    private val historyImageTimestampGapNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
+    private val historyPreSampleNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
     private val historySamplerNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
+    private val historySampleToDetectionNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
     private val historyDetectionNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
-    private val historyDecisionToSubmitNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
-    private val historyBinderQueueNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
-    private val historyBackendDispatchNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
+    private val historyDecisionToRequestNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
+    private val historyRequestToSubmitNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
+    private val historyAppToServiceArrivalNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
+    private val historyPriorityCallNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
+    private val historyServicePrepNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
     private val historyDownCallNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
     private val historyDecisionToDownNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
-    private val historyFrameToDownNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
+    private val historyProcessStartToDownNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
+    private val historyHoldNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
+    private val historyUpCallNs = LongArray(TRACE_CAPACITY) { INVALID_NS }
 
     private val nubiaInjector: NubiaVirtualTouchInjector? by lazy {
         NubiaVirtualTouchInjector.create().also {
@@ -58,20 +75,18 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
 
     override fun getBackendUid(): Int = Process.myUid()
 
-    override fun probeCapability(): Int {
-        return when {
-            Process.myUid() != SHELL_UID -> {
-                detail = "PixelTrigger requires Shizuku ADB/shell UID 2000; backend uid=${Process.myUid()}"
-                STATUS_ROOT_OR_NON_SHELL_REJECTED
-            }
-            nubiaInjector == null -> {
-                if (detail == "not probed") detail = "Nubia InputManager.virtualTouchEvent unavailable"
-                STATUS_INJECTOR_UNAVAILABLE
-            }
-            else -> {
-                detail = nubiaInjector!!.detail
-                STATUS_SAFE
-            }
+    override fun probeCapability(): Int = when {
+        Process.myUid() != SHELL_UID -> {
+            detail = "PixelTrigger requires Shizuku ADB/shell UID 2000; backend uid=${Process.myUid()}"
+            STATUS_ROOT_OR_NON_SHELL_REJECTED
+        }
+        nubiaInjector == null -> {
+            if (detail == "not probed") detail = "Nubia InputManager.virtualTouchEvent unavailable"
+            STATUS_INJECTOR_UNAVAILABLE
+        }
+        else -> {
+            detail = nubiaInjector!!.detail
+            STATUS_SAFE
         }
     }
 
@@ -90,59 +105,66 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         fireDecisionNs: Long,
         requestCreatedNs: Long,
         binderSubmitStartNs: Long,
+        samplerEntryGapNs: Long,
+        imageTimestampGapNs: Long,
     ) {
         val requestReceivedNs = SystemClock.elapsedRealtimeNanos()
 
-        // Store trace seed first so even a rejected/failed injection shows where it stopped.
         lastTriggerId = triggerId
-        lastFrameTimestampNs = frameTimestampNs
-        lastCaptureCallbackNs = captureCallbackNs
+        lastRawImageTimestampNs = frameTimestampNs
+        lastCaptureProcessStartNs = captureCallbackNs
         lastSampleStartNs = sampleStartNs
         lastSampleEndNs = sampleEndNs
         lastDetectionStartNs = detectionStartNs
         lastFireDecisionNs = fireDecisionNs
         lastRequestCreatedNs = requestCreatedNs
-        lastBinderSubmitStartNs = binderSubmitStartNs
+        lastAidlSubmitStartNs = binderSubmitStartNs
+        lastSamplerEntryGapNs = samplerEntryGapNs
+        lastImageTimestampGapNs = imageTimestampGapNs
         lastRequestReceivedNs = requestReceivedNs
+        lastPriorityStartNs = 0L
+        lastPriorityEndNs = 0L
         lastDownCallStartNs = 0L
         lastDownCallEndNs = 0L
         lastUpCallStartNs = 0L
         lastUpCallEndNs = 0L
 
-        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) }
-
-        if (Process.myUid() != SHELL_UID) {
-            detail = "tap ignored: UserService uid=${Process.myUid()}"
-            return
-        }
-        if (triggerId <= 0L || !x.isFinite() || !y.isFinite()) {
-            detail = "tap ignored: invalid argument"
-            return
-        }
-
-        val injector = nubiaInjector ?: run {
-            detail = "tap ignored: Nubia injector unavailable"
-            return
-        }
-        @Suppress("UNUSED_VARIABLE")
-        val ignoredDisplayId = displayId
-
-        val px = x.roundToInt()
-        val py = y.roundToInt()
         var downSent = false
         var upSent = false
-
+        var injector: NubiaVirtualTouchInjector? = null
         try {
+            lastPriorityStartNs = SystemClock.elapsedRealtimeNanos()
+            runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_DISPLAY) }
+            lastPriorityEndNs = SystemClock.elapsedRealtimeNanos()
+
+            if (Process.myUid() != SHELL_UID) {
+                detail = "tap ignored: UserService uid=${Process.myUid()}"
+                return
+            }
+            if (triggerId <= 0L || !x.isFinite() || !y.isFinite()) {
+                detail = "tap ignored: invalid argument"
+                return
+            }
+
+            injector = nubiaInjector ?: run {
+                detail = "tap ignored: Nubia injector unavailable"
+                return
+            }
+            @Suppress("UNUSED_VARIABLE")
+            val ignoredDisplayId = displayId
+
+            val px = x.roundToInt()
+            val py = y.roundToInt()
+
             lastDownCallStartNs = SystemClock.elapsedRealtimeNanos()
             injector.send(ACTION_DOWN, px, py)
             lastDownCallEndNs = SystemClock.elapsedRealtimeNanos()
             lastDownNs = lastDownCallEndNs
             downSent = true
 
-            // Requested contact interval only; it begins after synchronous DOWN returns.
             val upDeadlineNs = lastDownCallEndNs + TAP_DURATION_NS
             while (SystemClock.elapsedRealtimeNanos() < upDeadlineNs) {
-                // Intentional 1 ms spin to avoid Handler/sleep scheduler jitter.
+                // Intentional contact hold. It is measured separately from DOWN/UP transact time.
             }
 
             lastUpCallStartNs = SystemClock.elapsedRealtimeNanos()
@@ -154,142 +176,204 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
         } catch (t: Throwable) {
             detail = "Nubia virtual-touch error: ${t.javaClass.simpleName}: ${t.message ?: "unknown"}"
         } finally {
-            if (downSent && !upSent) {
+            if (downSent && !upSent && injector != null) {
                 runCatching {
                     lastUpCallStartNs = SystemClock.elapsedRealtimeNanos()
-                    injector.send(ACTION_UP, px, py)
+                    injector.send(ACTION_UP, x.roundToInt(), y.roundToInt())
                     lastUpCallEndNs = SystemClock.elapsedRealtimeNanos()
                     lastUpNs = lastUpCallEndNs
                 }
             }
-            recordCompletedTrace()
+            recordTrace()
         }
     }
 
-    private fun recordCompletedTrace() {
+    private fun recordTrace() {
         val slot = traceWriteIndex.getAndIncrement() and (TRACE_CAPACITY - 1)
-        historyFrameToCallbackNs[slot] = delta(lastFrameTimestampNs, lastCaptureCallbackNs)
+        historyTriggerId[slot] = lastTriggerId
+        historySamplerEntryGapNs[slot] = lastSamplerEntryGapNs
+        historyImageTimestampGapNs[slot] = lastImageTimestampGapNs
+        historyPreSampleNs[slot] = delta(lastCaptureProcessStartNs, lastSampleStartNs)
         historySamplerNs[slot] = delta(lastSampleStartNs, lastSampleEndNs)
+        historySampleToDetectionNs[slot] = delta(lastSampleEndNs, lastDetectionStartNs)
         historyDetectionNs[slot] = delta(lastDetectionStartNs, lastFireDecisionNs)
-        historyDecisionToSubmitNs[slot] = delta(lastFireDecisionNs, lastBinderSubmitStartNs)
-        historyBinderQueueNs[slot] = delta(lastBinderSubmitStartNs, lastRequestReceivedNs)
-        historyBackendDispatchNs[slot] = delta(lastRequestReceivedNs, lastDownCallStartNs)
+        historyDecisionToRequestNs[slot] = delta(lastFireDecisionNs, lastRequestCreatedNs)
+        historyRequestToSubmitNs[slot] = delta(lastRequestCreatedNs, lastAidlSubmitStartNs)
+        historyAppToServiceArrivalNs[slot] = delta(lastAidlSubmitStartNs, lastRequestReceivedNs)
+        historyPriorityCallNs[slot] = delta(lastPriorityStartNs, lastPriorityEndNs)
+        historyServicePrepNs[slot] = delta(lastRequestReceivedNs, lastDownCallStartNs)
         historyDownCallNs[slot] = delta(lastDownCallStartNs, lastDownCallEndNs)
         historyDecisionToDownNs[slot] = delta(lastFireDecisionNs, lastDownCallEndNs)
-        historyFrameToDownNs[slot] = delta(lastFrameTimestampNs, lastDownCallEndNs)
-        traceSamples.updateAndGet { current -> if (current < TRACE_CAPACITY) current + 1 else TRACE_CAPACITY }
+        historyProcessStartToDownNs[slot] = delta(lastCaptureProcessStartNs, lastDownCallEndNs)
+        historyHoldNs[slot] = delta(lastDownCallEndNs, lastUpCallStartNs)
+        historyUpCallNs[slot] = delta(lastUpCallStartNs, lastUpCallEndNs)
+        traceSamples.updateAndGet { if (it < TRACE_CAPACITY) it + 1 else TRACE_CAPACITY }
     }
 
     override fun getLastDownNs(): Long = lastDownNs
     override fun getLastUpNs(): Long = lastUpNs
 
-    override fun getLatencyDetail(): String {
-        return "backend=${nubiaInjector?.kind ?: "none"}; " +
-            "binderQueue=${fmtCompact(delta(lastBinderSubmitStartNs, lastRequestReceivedNs))}; " +
-            "dispatch=${fmtCompact(delta(lastRequestReceivedNs, lastDownCallStartNs))}; " +
+    override fun getLatencyDetail(): String =
+        "backend=${nubiaInjector?.kind ?: "none"}; " +
+            "app→service=${fmtCompact(delta(lastAidlSubmitStartNs, lastRequestReceivedNs))}; " +
+            "servicePrep=${fmtCompact(delta(lastRequestReceivedNs, lastDownCallStartNs))}; " +
             "downCall=${fmtCompact(delta(lastDownCallStartNs, lastDownCallEndNs))}; " +
             "upCall=${fmtCompact(delta(lastUpCallStartNs, lastUpCallEndNs))}"
-    }
 
     override fun getLatencyTraceReport(): String {
-        val stages = listOf(
-            Stage("frame → capture callback", delta(lastFrameTimestampNs, lastCaptureCallbackNs)),
-            Stage("callback → sample start", delta(lastCaptureCallbackNs, lastSampleStartNs)),
-            Stage("pixel sampling", delta(lastSampleStartNs, lastSampleEndNs)),
+        val intraShotStages = listOf(
+            Stage("capture processing start → sample", delta(lastCaptureProcessStartNs, lastSampleStartNs)),
+            Stage("PixelSampler (outer wall time)", delta(lastSampleStartNs, lastSampleEndNs)),
             Stage("sample end → detection start", delta(lastSampleEndNs, lastDetectionStartNs)),
-            Stage("detection / FIRE decision", delta(lastDetectionStartNs, lastFireDecisionNs)),
-            Stage("decision → TapRequest", delta(lastFireDecisionNs, lastRequestCreatedNs)),
-            Stage("TapRequest → Binder submit", delta(lastRequestCreatedNs, lastBinderSubmitStartNs)),
-            Stage("Binder one-way queue", delta(lastBinderSubmitStartNs, lastRequestReceivedNs)),
-            Stage("UserService dispatch → DOWN call", delta(lastRequestReceivedNs, lastDownCallStartNs)),
-            Stage("Nubia DOWN transact", delta(lastDownCallStartNs, lastDownCallEndNs)),
-            Stage("DOWN return → UP call", delta(lastDownCallEndNs, lastUpCallStartNs)),
-            Stage("Nubia UP transact", delta(lastUpCallStartNs, lastUpCallEndNs)),
+            Stage("DetectionEngine wall time", delta(lastDetectionStartNs, lastFireDecisionNs)),
+            Stage("FIRE decision → TapRequest created", delta(lastFireDecisionNs, lastRequestCreatedNs)),
+            Stage("TapRequest → AIDL submit start", delta(lastRequestCreatedNs, lastAidlSubmitStartNs)),
+            Stage("AIDL submit start → UserService receive", delta(lastAidlSubmitStartNs, lastRequestReceivedNs)),
+            Stage("setThreadPriority call", delta(lastPriorityStartNs, lastPriorityEndNs)),
+            Stage("UserService receive → Nubia DOWN start", delta(lastRequestReceivedNs, lastDownCallStartNs)),
+            Stage("Nubia DOWN synchronous transact", delta(lastDownCallStartNs, lastDownCallEndNs)),
+            Stage("requested DOWN hold", delta(lastDownCallEndNs, lastUpCallStartNs)),
+            Stage("Nubia UP synchronous transact", delta(lastUpCallStartNs, lastUpCallEndNs)),
         )
-        val culprit = stages.filter { it.ns >= 0L }.maxByOrNull { it.ns }
+        val culprit = intraShotStages.filter { it.ns >= 0L }.maxByOrNull { it.ns }
         val sampleCount = traceSamples.get().coerceIn(0, TRACE_CAPACITY)
 
-        return buildString(2400) {
-            append("🔬 PixelTrigger ns profiler — trigger #").append(lastTriggerId).append('\n')
-            append("Clock: elapsedRealtimeNanos; values are ns timestamps/deltas, not a guarantee of 1 ns physical accuracy.\n\n")
+        return buildString(5200) {
+            append("BACKEND / FIRE PIPELINE — trigger #").append(lastTriggerId).append('\n')
+            append("Clock domain: elapsedRealtimeNanos only for every cross-process subtraction below.\n")
+            append("Image.timestamp absolute value is UNSYNCED and excluded from all latency totals/culprit calculations.\n\n")
 
-            append("LAST SHOT\n")
-            stages.forEachIndexed { index, stage ->
-                append(String.format(Locale.US, "%02d. %-31s %s\n", index + 1, stage.name, fmt(stage.ns)))
+            append("TRIGGER-FRAME CADENCE (already-computed clock-safe deltas)\n")
+            append("sampler-entry interval: ").append(fmt(lastSamplerEntryGapNs)).append('\n')
+            append("source ΔImage.timestamp: ").append(fmt(lastImageTimestampGapNs))
+                .append("  [same foreign clock only]\n\n")
+
+            append("LAST SHOT — OBSERVABLE STAGES\n")
+            intraShotStages.forEachIndexed { index, stage ->
+                append(String.format(Locale.US, "%02d. %-39s %s\n", index + 1, stage.name, fmt(stage.ns)))
             }
             append('\n')
-            append("TOTAL fire decision → DOWN returned: ")
+            append("TOTAL FIRE decision → Nubia DOWN return: ")
                 .append(fmt(delta(lastFireDecisionNs, lastDownCallEndNs))).append('\n')
-            append("TOTAL capture callback → DOWN returned: ")
-                .append(fmt(delta(lastCaptureCallbackNs, lastDownCallEndNs))).append('\n')
-            append("TOTAL frame timestamp → DOWN returned: ")
-                .append(fmt(delta(lastFrameTimestampNs, lastDownCallEndNs))).append('\n')
-            append("Requested DOWN → UP hold: ")
-                .append(fmt(delta(lastDownCallEndNs, lastUpCallStartNs))).append('\n')
+            append("TOTAL capture-processing start → Nubia DOWN return: ")
+                .append(fmt(delta(lastCaptureProcessStartNs, lastDownCallEndNs))).append('\n')
+            append("Requested contact hold: ").append(fmt(delta(lastDownCallEndNs, lastUpCallStartNs))).append('\n')
 
             if (culprit != null) {
-                append("\n🚨 Largest measured stage: ").append(culprit.name)
-                    .append(" = ").append(fmt(culprit.ns)).append('\n')
+                append("\n🚨 Largest OBSERVABLE intra-shot stage: ")
+                    .append(culprit.name).append(" = ").append(fmt(culprit.ns)).append('\n')
             }
 
-            append("\nROLLING STATS — last ").append(sampleCount).append(" shots\n")
-            append(statLine("frame→callback", historyFrameToCallbackNs, sampleCount))
-            append(statLine("sampling", historySamplerNs, sampleCount))
-            append(statLine("detection", historyDetectionNs, sampleCount))
-            append(statLine("decision→submit", historyDecisionToSubmitNs, sampleCount))
-            append(statLine("Binder queue", historyBinderQueueNs, sampleCount))
-            append(statLine("backend dispatch", historyBackendDispatchNs, sampleCount))
+            append("\nROLLING FIRE STATS — last ").append(sampleCount).append(" shots\n")
+            append(statLine("sampler-entry interval", historySamplerEntryGapNs, sampleCount))
+            append(statLine("source image Δtimestamp", historyImageTimestampGapNs, sampleCount))
+            append(statLine("pre-sample app work", historyPreSampleNs, sampleCount))
+            append(statLine("PixelSampler", historySamplerNs, sampleCount))
+            append(statLine("sample→detection", historySampleToDetectionNs, sampleCount))
+            append(statLine("DetectionEngine", historyDetectionNs, sampleCount))
+            append(statLine("decision→request", historyDecisionToRequestNs, sampleCount))
+            append(statLine("request→AIDL submit", historyRequestToSubmitNs, sampleCount))
+            append(statLine("app→UserService arrival", historyAppToServiceArrivalNs, sampleCount))
+            append(statLine("setThreadPriority", historyPriorityCallNs, sampleCount))
+            append(statLine("UserService prep", historyServicePrepNs, sampleCount))
             append(statLine("Nubia DOWN", historyDownCallNs, sampleCount))
-            append(statLine("decision→DOWN", historyDecisionToDownNs, sampleCount))
-            append(statLine("frame→DOWN", historyFrameToDownNs, sampleCount))
+            append(statLine("decision→DOWN return", historyDecisionToDownNs, sampleCount))
+            append(statLine("process start→DOWN", historyProcessStartToDownNs, sampleCount))
+            append(statLine("DOWN hold", historyHoldNs, sampleCount))
+            append(statLine("Nubia UP", historyUpCallNs, sampleCount))
 
-            append("\nRAW ns\n")
-            append("frame=").append(lastFrameTimestampNs)
-                .append(" callback=").append(lastCaptureCallbackNs)
+            append("\nTOP DECISION→DOWN OUTLIERS\n")
+            append(outlierReport(sampleCount))
+
+            append("\nMEASUREMENT BOUNDARIES / DO NOT OVERCLAIM\n")
+            append("✓ We can measure: sampler cadence, app processing, cross-process arrival, UserService prep, vendor Binder call duration.\n")
+            append("✗ We cannot directly measure from this app: physical OLED pixel-change time → MediaProjection availability.\n")
+            append("✗ Nubia DOWN transact return is not proof of the exact instant the target game consumed the event.\n")
+            append("✗ app→UserService arrival combines Binder transport + remote scheduling; this app cannot split those two without system tracing.\n")
+            append("For kernel scheduler/Binder/InputDispatcher attribution, capture a Perfetto system trace around an incident.\n")
+
+            append("\nRAW CLOCK-SAFE elapsedRealtimeNanos\n")
+            append("processStart=").append(lastCaptureProcessStartNs)
                 .append(" sampleStart=").append(lastSampleStartNs)
-                .append(" sampleEnd=").append(lastSampleEndNs).append('\n')
-            append("detectStart=").append(lastDetectionStartNs)
-                .append(" fire=").append(lastFireDecisionNs)
+                .append(" sampleEnd=").append(lastSampleEndNs)
+                .append(" detectStart=").append(lastDetectionStartNs).append('\n')
+            append("fire=").append(lastFireDecisionNs)
                 .append(" request=").append(lastRequestCreatedNs)
-                .append(" submit=").append(lastBinderSubmitStartNs).append('\n')
-            append("serviceRx=").append(lastRequestReceivedNs)
+                .append(" submit=").append(lastAidlSubmitStartNs)
+                .append(" serviceRx=").append(lastRequestReceivedNs).append('\n')
+            append("priorityStart=").append(lastPriorityStartNs)
+                .append(" priorityEnd=").append(lastPriorityEndNs)
                 .append(" downStart=").append(lastDownCallStartNs)
-                .append(" downEnd=").append(lastDownCallEndNs)
-                .append(" upStart=").append(lastUpCallStartNs)
-                .append(" upEnd=").append(lastUpCallEndNs)
+                .append(" downEnd=").append(lastDownCallEndNs).append('\n')
+            append("upStart=").append(lastUpCallStartNs)
+                .append(" upEnd=").append(lastUpCallEndNs).append('\n')
+            append("raw Image.timestamp (UNSYNCED, informational only)=").append(lastRawImageTimestampNs).append('\n')
         }
     }
 
     override fun clearLatencyTraceHistory() {
         traceWriteIndex.set(0)
         traceSamples.set(0)
+        historyTriggerId.fill(0L)
         listOf(
-            historyFrameToCallbackNs,
+            historySamplerEntryGapNs,
+            historyImageTimestampGapNs,
+            historyPreSampleNs,
             historySamplerNs,
+            historySampleToDetectionNs,
             historyDetectionNs,
-            historyDecisionToSubmitNs,
-            historyBinderQueueNs,
-            historyBackendDispatchNs,
+            historyDecisionToRequestNs,
+            historyRequestToSubmitNs,
+            historyAppToServiceArrivalNs,
+            historyPriorityCallNs,
+            historyServicePrepNs,
             historyDownCallNs,
             historyDecisionToDownNs,
-            historyFrameToDownNs,
+            historyProcessStartToDownNs,
+            historyHoldNs,
+            historyUpCallNs,
         ).forEach { it.fill(INVALID_NS) }
     }
 
+    private fun outlierReport(count: Int): String {
+        if (count <= 0) return "n/a\n"
+        val candidates = ArrayList<Pair<Int, Long>>(count)
+        for (i in 0 until TRACE_CAPACITY) {
+            val value = historyDecisionToDownNs[i]
+            if (value >= 0L && historyTriggerId[i] > 0L) candidates.add(i to value)
+        }
+        if (candidates.isEmpty()) return "n/a\n"
+        candidates.sortByDescending { it.second }
+        return buildString {
+            candidates.take(5).forEachIndexed { rank, (index, total) ->
+                append('#').append(rank + 1)
+                    .append(" trigger=").append(historyTriggerId[index])
+                    .append(" decision→DOWN=").append(fmtCompact(total))
+                    .append(" frameGap=").append(fmtCompact(historySamplerEntryGapNs[index]))
+                    .append(" app→service=").append(fmtCompact(historyAppToServiceArrivalNs[index]))
+                    .append(" servicePrep=").append(fmtCompact(historyServicePrepNs[index]))
+                    .append(" downCall=").append(fmtCompact(historyDownCallNs[index]))
+                    .append('\n')
+            }
+        }
+    }
+
     private fun statLine(label: String, source: LongArray, count: Int): String {
-        if (count <= 0) return String.format(Locale.US, "%-18s n/a\n", label)
-        val valid = source.asSequence().filter { it >= 0L }.take(count).toList().sorted()
-        if (valid.isEmpty()) return String.format(Locale.US, "%-18s n/a\n", label)
+        if (count <= 0) return String.format(Locale.US, "%-24s n/a\n", label)
+        val valid = source.filter { it >= 0L }.take(count).sorted()
+        if (valid.isEmpty()) return String.format(Locale.US, "%-24s n/a\n", label)
         fun percentile(p: Double): Long {
-            val index = ((valid.size - 1) * p).roundToInt().coerceIn(0, valid.lastIndex)
-            return valid[index]
+            val rank = ceil(p * valid.size).toInt().coerceIn(1, valid.size)
+            return valid[rank - 1]
         }
         return String.format(
             Locale.US,
-            "%-18s P50=%-12s P95=%-12s MAX=%s\n",
+            "%-24s P50=%-10s P90=%-10s P95=%-10s P99=%-10s MAX=%s\n",
             label,
             fmtCompact(percentile(0.50)),
+            fmtCompact(percentile(0.90)),
             fmtCompact(percentile(0.95)),
+            fmtCompact(percentile(0.99)),
             fmtCompact(valid.last()),
         )
     }
@@ -306,15 +390,15 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     private fun fmt(ns: Long): String = when {
         ns < 0L -> "n/a"
         ns < 1_000L -> "$ns ns"
-        ns < 1_000_000L -> String.format(Locale.US, "%,d ns  |  %.3f µs", ns, ns / 1_000.0)
-        else -> String.format(Locale.US, "%,d ns  |  %.3f µs  |  %.6f ms", ns, ns / 1_000.0, ns / 1_000_000.0)
+        ns < 1_000_000L -> String.format(Locale.US, "%,d ns | %.3f µs", ns, ns / 1_000.0)
+        else -> String.format(Locale.US, "%,d ns | %.3f µs | %.6f ms", ns, ns / 1_000.0, ns / 1_000_000.0)
     }
 
     private fun fmtCompact(ns: Long): String = when {
         ns < 0L -> "n/a"
         ns < 1_000L -> "${ns}ns"
         ns < 1_000_000L -> String.format(Locale.US, "%.3fµs", ns / 1_000.0)
-        else -> String.format(Locale.US, "%.6fms", ns / 1_000_000.0)
+        else -> String.format(Locale.US, "%.3fms", ns / 1_000_000.0)
     }
 
     private interface NubiaVirtualTouchInjector {
@@ -420,7 +504,7 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
 
         private const val INPUT_MANAGER_DESCRIPTOR = "android.hardware.input.IInputManager"
         private const val TRANSACTION_VIRTUAL_TOUCH_EVENT = 126
-        private const val TRACE_CAPACITY = 64
+        private const val TRACE_CAPACITY = 128
         private const val INVALID_NS = -1L
 
         const val STATUS_OK = 0

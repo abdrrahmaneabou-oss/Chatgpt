@@ -8,7 +8,7 @@ import kotlin.math.abs
  * Arming remains exactly three consecutive WHITE frames. During those three
  * frames the detector builds a stable baseline for the fixed 0.3 mm probe.
  * Once ARMED, FIRE requires BOTH a meaningful departure from that baseline and
- * a dark current sample (average luminance <= 75). Light/non-white colors keep
+ * a dark current sample (average luminance <= 90). Light/non-white colors keep
  * the engine ARMED and never add a debounce, timer, or extra-frame wait.
  */
 class DetectionEngine(
@@ -148,7 +148,6 @@ class DetectionEngine(
     private var whiteFrames: Int = 0
     private var manualRearmWhiteFrames: Int = 0
 
-    // Aggregate baseline sums. Used only during arming/rearming.
     private var whiteRedSum = 0L
     private var whiteGreenSum = 0L
     private var whiteBlueSum = 0L
@@ -157,7 +156,6 @@ class DetectionEngine(
     private var whiteLuminanceSum = 0L
     private var whiteChromaSum = 0L
 
-    // Fixed-probe baseline sums, allocated once and never on the hot frame path.
     private var baselineProbeCount = 0
     private val probeRedSum = LongArray(MAX_PROBE_POINTS)
     private val probeGreenSum = LongArray(MAX_PROBE_POINTS)
@@ -235,10 +233,6 @@ class DetectionEngine(
                 reference != null && sample.isPredictiveWhiteLossFrom(reference)
             }
 
-            // Hot gate: the current frame itself must both depart from the armed
-            // white baseline and be dark enough. This is one integer comparison
-            // on averageLuminance already computed by PixelSampler; no timer,
-            // debounce, extra frame, or 35%-white fallback can delay/force FIRE.
             if (changed && sample.isFireLuminance()) {
                 fire(nowMs)
                 Event.Fired(nowMs)
@@ -356,7 +350,7 @@ class DetectionEngine(
         const val MIN_SAMPLE_PIXELS = 1
 
         const val ARM_WHITE_COVERAGE = 0.50f
-        const val HOLD_WHITE_COVERAGE = 0.35f // retained for compatibility only; not a FIRE gate
+        const val HOLD_WHITE_COVERAGE = 0.35f
 
         const val PROBE_CHANNEL_DELTA = 18
         const val PROBE_LUMINANCE_DROP = 12
@@ -377,11 +371,10 @@ class DetectionEngine(
         const val MIN_CHANGE_CHROMA_RISE = 24
         const val MIN_CHANGE_WHITE_COVERAGE_DROP = 0.35f
 
-        // Exact user-selected maximum luminance for FIRE. Anything above 75 is
+        // Exact user-selected maximum luminance for FIRE. Anything above 90 is
         // treated as too light and leaves the detector ARMED.
-        const val FIRE_MAX_LUMINANCE = 75
+        const val FIRE_MAX_LUMINANCE = 90
 
-        // Legacy/detection diagnostics retained; FIRE no longer depends on them.
         const val DARK_PIXEL_MAX_LUMINANCE = 88
         const val DARK_PIXEL_MAX_CHANNEL = 118
         const val DARK_PIXEL_MAX_CHROMA = 72

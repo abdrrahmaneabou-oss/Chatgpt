@@ -131,17 +131,24 @@ class DetectionEngineBaselineTest {
         assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
     }
 
-    @Test fun luminance75IsAcceptedAnd76IsRejected() {
+    @Test fun luminance90IsAcceptedAnd91IsRejected() {
         val reject = DetectionEngine()
         arm(reject)
-        val l76 = sample(76, 76, 76, 0f, 0f, 76, 0)
-        assertTrue(reject.processSample(l76, 4) is DetectionEngine.Event.None)
+        val l91 = sample(91, 91, 91, 0f, 0f, 91, 0)
+        assertTrue(reject.processSample(l91, 4) is DetectionEngine.Event.None)
         assertEquals(DetectionEngine.State.ARMED, reject.state)
 
         val accept = DetectionEngine()
         arm(accept)
-        val l75 = sample(75, 75, 75, 0f, 0f, 75, 0)
-        assertTrue(accept.processSample(l75, 4) is DetectionEngine.Event.Fired)
+        val l90 = sample(90, 90, 90, 0f, 0f, 90, 0)
+        assertTrue(accept.processSample(l90, 4) is DetectionEngine.Event.Fired)
+    }
+
+    @Test fun orangeBrownAround82NowFires() {
+        val e = DetectionEngine()
+        arm(e)
+        val orangeBrown = sample(147, 70, 26, 0f, 0f, 82, 121)
+        assertTrue(e.processSample(orangeBrown, 4) is DetectionEngine.Event.Fired)
     }
 
     @Test fun darkSaturatedColorCanFireBecauseGateIsDarknessNotHue() {
@@ -180,9 +187,9 @@ class DetectionEngineBaselineTest {
         assertEquals(DetectionEngine.State.ARMED, e.state)
 
         val threeChangedButAverageTooLight = probeSample(
-            p0 = rgb(70),
-            p1 = rgb(70),
-            p2 = rgb(70),
+            p0 = rgb(90),
+            p1 = rgb(90),
+            p2 = rgb(90),
             p3 = rgb(240),
             p4 = rgb(240),
             whiteRatio = 0.40f,
@@ -190,7 +197,7 @@ class DetectionEngineBaselineTest {
         assertTrue(e.processSample(threeChangedButAverageTooLight, 5) is DetectionEngine.Event.None)
         assertEquals(DetectionEngine.State.ARMED, e.state)
 
-        val fiveDark = probeSample(rgb(70), whiteRatio = 0f)
+        val fiveDark = probeSample(rgb(90), whiteRatio = 0f)
         assertTrue(e.processSample(fiveDark, 6) is DetectionEngine.Event.Fired)
     }
 
@@ -203,7 +210,7 @@ class DetectionEngineBaselineTest {
         assertTrue(e.processSample(changedLight, 4) is DetectionEngine.Event.None)
         assertEquals(DetectionEngine.State.ARMED, e.state)
 
-        val changedDark = probeSample(rgb(75), count = 1, whiteRatio = 0f)
+        val changedDark = probeSample(rgb(90), count = 1, whiteRatio = 0f)
         assertTrue(e.processSample(changedDark, 5) is DetectionEngine.Event.Fired)
     }
 
@@ -235,7 +242,7 @@ class DetectionEngineBaselineTest {
         assertEquals(1, DetectionEngine.MIN_SAMPLE_PIXELS)
         assertEquals(18, DetectionEngine.PROBE_CHANNEL_DELTA)
         assertEquals(12, DetectionEngine.PROBE_LUMINANCE_DROP)
-        assertEquals(75, DetectionEngine.FIRE_MAX_LUMINANCE)
+        assertEquals(90, DetectionEngine.FIRE_MAX_LUMINANCE)
         assertEquals(0.50f, DetectionEngine.ARM_WHITE_COVERAGE)
         assertEquals(190, DetectionEngine.WHITE_PIXEL_LUMINANCE)
         assertEquals(170, DetectionEngine.WHITE_PIXEL_MIN_CHANNEL)

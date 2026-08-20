@@ -1,10 +1,11 @@
-name: PixelTrigger v3 Android CI
+name: PixelTrigger v3 UltraFast Predictive CI
 
 on:
   push:
-    branches: [pixeltrigger-v3-shizuku]
+    branches: [pixeltrigger-v3-ultrafast-predictive]
     paths:
       - 'app/**'
+      - 'scripts/apply_ultrafast_predictive.py'
       - 'build.gradle.kts'
       - 'settings.gradle.kts'
       - 'gradle.properties'
@@ -14,20 +15,35 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: pixeltrigger-v3-ultrafast-predictive
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: pixeltrigger-v3-shizuku
+          ref: pixeltrigger-v3-ultrafast-predictive
           fetch-depth: 0
 
-      - name: Capture source provenance
-        id: source
+      - name: Apply deterministic profiler-free hot-path migration
         shell: bash
         run: |
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          python3 scripts/apply_ultrafast_predictive.py
+          if ! git diff --quiet -- app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt; then
+            git config user.name 'PixelTrigger UltraFast CI'
+            git config user.email 'actions@users.noreply.github.com'
+            git add app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt
+            git commit -m 'perf: strip timing overhead and use direct fireFast path'
+            git push origin HEAD:pixeltrigger-v3-ultrafast-predictive
+          fi
+
+      - name: Capture exact source provenance
+        shell: bash
+        run: |
           echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
@@ -40,54 +56,54 @@ jobs:
           gradle-version: '8.7'
 
       - name: Clean, test, and build debug APK
+        shell: bash
         run: gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace
 
-      - name: Publish verified APK to branch
+      - name: Publish verified UltraFast Predictive APK
         shell: bash
         run: |
           set -euo pipefail
           APK=app/build/outputs/apk/debug/app-debug.apk
           test -s "$APK"
           mkdir -p dist docs
-          cp "$APK" dist/PixelTrigger-v3-debug.apk
-          cp "$APK" dist/PixelTrigger-v3-direct-1ms-debug.apk
-          DEBUG_SHA=$(sha256sum dist/PixelTrigger-v3-debug.apk | cut -d' ' -f1)
-          DIRECT_SHA=$(sha256sum dist/PixelTrigger-v3-direct-1ms-debug.apk | cut -d' ' -f1)
-          test "$DEBUG_SHA" = "$DIRECT_SHA"
-          printf '%s  %s\n' "$DEBUG_SHA" 'dist/PixelTrigger-v3-debug.apk' > dist/PixelTrigger-v3-debug.apk.sha256
-          printf '%s  %s\n' "$DIRECT_SHA" 'dist/PixelTrigger-v3-direct-1ms-debug.apk' > dist/PixelTrigger-v3-direct-1ms-debug.apk.sha256
+          cp "$APK" dist/PixelTrigger-v3-ultrafast-predictive-debug.apk
+          SHA=$(sha256sum dist/PixelTrigger-v3-ultrafast-predictive-debug.apk | cut -d' ' -f1)
+          printf '%s  %s\n' "$SHA" 'dist/PixelTrigger-v3-ultrafast-predictive-debug.apk' > dist/PixelTrigger-v3-ultrafast-predictive-debug.apk.sha256
           {
-            echo '# PixelTrigger immediate-fire CI status'
+            echo '# PixelTrigger UltraFast Predictive status'
             echo
             echo '- Unit tests: PASS'
             echo '- APK build: PASS (clean --rerun-tasks)'
             echo "- Source commit: $SOURCE_SHA"
+            echo '- Profiler: REMOVED / OFF'
             echo '- Monitor diameter: 0.3 mm'
-            echo '- Arming: exactly 3 consecutive WHITE frames'
-            echo '- FIRE: first frame after ARMED that is no longer holding-white; no wait for DARK/black'
-            echo '- Input readiness: diagnostics cannot delay the detector FIRE transition'
-            echo '- Nubia hot path: readiness is latched after successful warm-up and cleared only on real disconnect / explicit unsafe result'
-            echo '- Tap backend: Shizuku shell -> Nubia InputManager.virtualTouchEvent -> InputReader/NubiaGamepad'
-            echo '- Exactly one tap: one DOWN + one UP; no retry / backup press / Accessibility fallback'
-            echo '- Requested DOWN/UP separation: ~1 ms after DOWN returns'
-            echo "- APK SHA-256: $DIRECT_SHA"
-          } > docs/DIRECT_FIRE_STATUS.md
+            echo '- Capture scale: 50%'
+            echo '- Capture thread: THREAD_PRIORITY_URGENT_DISPLAY'
+            echo '- Arming baseline: exactly 3 consecutive WHITE frames, averaged'
+            echo '- Predictive FIRE: first meaningful weakening relative to the 3-frame white baseline'
+            echo '- Predictive coverage drop gate: 0.15'
+            echo '- Predictive uniform luminance drop gate: 18 with minimum-channel drop >= 14'
+            echo '- Hard fallback: white coverage below 0.35'
+            echo '- FIRE path: DetectionEngine -> ShizukuTapEngine.fireFast -> one oneway AIDL -> Nubia virtualTouchEvent'
+            echo '- No TapCoordinator allocation/AtomicLong/timestamp on FIRE hot path'
+            echo '- Exactly one DOWN + one UP; no retry / backup tap / Accessibility fallback'
+            echo '- Requested DOWN/UP contact separation: ~1 ms after DOWN returns'
+            echo "- APK SHA-256: $SHA"
+          } > docs/ULTRAFAST_PREDICTIVE_STATUS.md
 
-          git config user.name 'PixelTrigger Android CI'
+          git config user.name 'PixelTrigger UltraFast CI'
           git config user.email 'actions@users.noreply.github.com'
-          git add dist/PixelTrigger-v3-debug.apk \
-                  dist/PixelTrigger-v3-debug.apk.sha256 \
-                  dist/PixelTrigger-v3-direct-1ms-debug.apk \
-                  dist/PixelTrigger-v3-direct-1ms-debug.apk.sha256 \
-                  docs/DIRECT_FIRE_STATUS.md
+          git add dist/PixelTrigger-v3-ultrafast-predictive-debug.apk \
+                  dist/PixelTrigger-v3-ultrafast-predictive-debug.apk.sha256 \
+                  docs/ULTRAFAST_PREDICTIVE_STATUS.md
           if ! git diff --cached --quiet; then
-            git commit -m "build: publish verified immediate-fire APK from $SOURCE_SHA"
-            git push origin HEAD:pixeltrigger-v3-shizuku
+            git commit -m "build: publish ultrafast predictive APK from $SOURCE_SHA"
+            git push origin HEAD:pixeltrigger-v3-ultrafast-predictive
           fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: PixelTrigger-v3-direct-1ms-debug
+          name: PixelTrigger-v3-ultrafast-predictive-debug
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error

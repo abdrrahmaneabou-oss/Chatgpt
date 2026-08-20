@@ -19,6 +19,9 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
     @Volatile var capabilityDetail: String = "Shizuku not connected"
         private set
 
+    // FIRE is produced only by the capture thread, so this counter needs no AtomicLong.
+    private var fastTriggerId: Long = 0L
+
     private val args = Shizuku.UserServiceArgs(
         ComponentName(context.packageName, ShizukuInputUserService::class.java.name),
     )
@@ -72,11 +75,7 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         }
     }
 
-    /**
-     * Slow capability/diagnostic path. Once STATUS_SAFE has warmed the vendor path,
-     * a transient diagnostic Binder failure must not de-arm the hot path. Only a real
-     * service disconnect or an explicit non-safe capability result clears the latch.
-     */
+    /** Slow capability/diagnostic path; never called by FIRE itself. */
     fun refreshCapability(): InputCapability {
         val service = remote ?: run {
             hotPathReady = false
@@ -101,13 +100,26 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         return capability
     }
 
-    /** No synchronous probe is performed here. This is a volatile-memory check only. */
+    /** Volatile-memory check only. */
     fun isReady(): Boolean = remote != null && hotPathReady
 
     /**
-     * Hot path: exactly one one-way Binder transaction. No retry, no backup DOWN,
-     * no synchronous vendor wait and no post-tap diagnostic Binder reads.
+     * Fastest app-side path: no TapRequest, no TapResult, no AtomicLong, no timestamp,
+     * no diagnostics. One direct oneway AIDL submit and return.
      */
+    fun fireFast(x: Float, y: Float, displayId: Int = 0): Boolean {
+        val service = remote ?: return false
+        if (!hotPathReady) return false
+        val triggerId = ++fastTriggerId
+        return try {
+            service.injectTapFast(triggerId, x, y, displayId)
+            true
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /** Compatibility path retained for non-hot-path callers/tests. */
     override fun tap(request: TapRequest): TapResult {
         val acceptedAt = SystemClock.elapsedRealtimeNanos()
         val service = remote
@@ -134,7 +146,6 @@ class ShizukuTapEngine(private val context: Context) : TapEngine {
         }
     }
 
-    /** Slow diagnostics path, called only from UI/menu code, never from FIRE. */
     fun latencyDetail(): String {
         val service = remote ?: return "latency: disconnected"
         return runCatching { service.latencyDetail }.getOrDefault("latency: unavailable")

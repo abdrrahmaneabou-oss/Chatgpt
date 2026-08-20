@@ -32,36 +32,76 @@ jobs:
         run: echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Verify v4 hot-path invariants
+        id: invariants
+        continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
-          CAPTURE=app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt
-          SAMPLER=app/src/main/java/com/pixeltrigger/app/engine/PixelSampler.kt
-          DETECTOR=app/src/main/java/com/pixeltrigger/app/engine/DetectionEngine.kt
+          set -o pipefail
+          {
+            set -euo pipefail
+            CAPTURE=app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt
+            SAMPLER=app/src/main/java/com/pixeltrigger/app/engine/PixelSampler.kt
+            DETECTOR=app/src/main/java/com/pixeltrigger/app/engine/DetectionEngine.kt
 
-          grep -q 'MONITOR_DIAMETER_MM = 0.3f' "$CAPTURE"
-          grep -q 'acquireLatestImage()' "$CAPTURE"
-          ! grep -q 'acquireNextImage()' "$CAPTURE"
-          grep -q 'PixelFormat.RGBA_8888, 2' "$CAPTURE"
-          grep -q 'MAX_PROBE_POINTS = 5' "$DETECTOR"
-          grep -q 'REQUIRED_ARM_FRAMES = 3' "$DETECTOR"
-          grep -q 'probePointChanged' "$DETECTOR"
-          grep -q 'center + left + right + top + bottom' "$SAMPLER"
+            grep -q 'MONITOR_DIAMETER_MM = 0.3f' "$CAPTURE"
+            grep -q 'acquireLatestImage()' "$CAPTURE"
+            ! grep -q 'acquireNextImage()' "$CAPTURE"
+            grep -q 'PixelFormat.RGBA_8888, 2' "$CAPTURE"
+            grep -q 'MAX_PROBE_POINTS = 5' "$DETECTOR"
+            grep -q 'REQUIRED_ARM_FRAMES = 3' "$DETECTOR"
+            grep -q 'probePointChanged' "$DETECTOR"
+            grep -q 'center + left + right + top + bottom' "$SAMPLER"
+          } 2>&1 | tee /tmp/v4-invariants.log
 
       - uses: actions/setup-java@v4
+        if: steps.invariants.outcome == 'success'
         with:
           distribution: temurin
           java-version: '17'
 
       - uses: gradle/actions/setup-gradle@v4
+        if: steps.invariants.outcome == 'success'
         with:
           gradle-version: '8.7'
 
       - name: Clean, test, and build v4 debug APK
+        id: gradle_build
+        if: steps.invariants.outcome == 'success'
+        continue-on-error: true
         shell: bash
-        run: gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace
+        run: |
+          set -o pipefail
+          gradle --no-daemon --rerun-tasks clean :app:testDebugUnitTest :app:assembleDebug --stacktrace 2>&1 | tee /tmp/v4-gradle.log
+
+      - name: Persist failure diagnostics
+        if: steps.invariants.outcome != 'success' || steps.gradle_build.outcome != 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs
+          {
+            echo '# PixelProbe v4 CI failure'
+            echo
+            echo "Source commit: $SOURCE_SHA"
+            echo "Invariant step: ${{ steps.invariants.outcome }}"
+            echo "Gradle step: ${{ steps.gradle_build.outcome }}"
+            echo
+            echo '## Invariants output'
+            if [ -f /tmp/v4-invariants.log ]; then tail -n 120 /tmp/v4-invariants.log; else echo 'n/a'; fi
+            echo
+            echo '## Gradle output (tail)'
+            if [ -f /tmp/v4-gradle.log ]; then tail -n 320 /tmp/v4-gradle.log; else echo 'n/a'; fi
+          } > docs/PIXELPROBE_V4_FAILURE.log
+
+          git config user.name 'PixelTrigger v4 CI'
+          git config user.email 'actions@users.noreply.github.com'
+          git add docs/PIXELPROBE_V4_FAILURE.log
+          git commit -m "ci: record PixelProbe v4 failure for $SOURCE_SHA" || true
+          git push origin HEAD:pixeltrigger-v4-pixelprobe
+          exit 1
 
       - name: Publish verified v4 PixelProbe APK
+        if: steps.invariants.outcome == 'success' && steps.gradle_build.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -97,15 +137,18 @@ jobs:
             echo "- APK SHA-256: $SHA"
           } > docs/PIXELPROBE_V4_STATUS.md
 
+          rm -f docs/PIXELPROBE_V4_FAILURE.log
           git config user.name 'PixelTrigger v4 CI'
           git config user.email 'actions@users.noreply.github.com'
           git add "$OUT" "$OUT.sha256" docs/PIXELPROBE_V4_STATUS.md
+          git add -u docs/PIXELPROBE_V4_FAILURE.log || true
           if ! git diff --cached --quiet; then
             git commit -m "build: publish PixelProbe v4 APK from $SOURCE_SHA"
             git push origin HEAD:pixeltrigger-v4-pixelprobe
           fi
 
       - name: Upload v4 APK artifact
+        if: steps.invariants.outcome == 'success' && steps.gradle_build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: PixelTrigger-v4-pixelprobe-debug

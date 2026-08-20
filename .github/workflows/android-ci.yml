@@ -64,7 +64,7 @@ jobs:
             echo "- UTC: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
             echo
             echo '```text'
-            tail -n 260 /tmp/pixeltrigger-gradle.log
+            tail -n 300 /tmp/pixeltrigger-gradle.log
             echo '```'
           } > docs/CI_BUILD_FAILURE.log
           git config user.name 'PixelTrigger Android CI'
@@ -94,7 +94,7 @@ jobs:
           printf '%s  %s\n' "$DEBUG_SHA" 'dist/PixelTrigger-v3-debug.apk' > dist/PixelTrigger-v3-debug.apk.sha256
           printf '%s  %s\n' "$DIRECT_SHA" 'dist/PixelTrigger-v3-direct-1ms-debug.apk' > dist/PixelTrigger-v3-direct-1ms-debug.apk.sha256
           {
-            echo '# PixelTrigger immediate-fire + ns-profiler CI status'
+            echo '# PixelTrigger immediate-fire + Professional Latency Lab CI status'
             echo
             echo '- Unit tests: PASS'
             echo '- APK build: PASS (clean --rerun-tasks)'
@@ -102,13 +102,15 @@ jobs:
             echo '- Monitor diameter: 0.3 mm'
             echo '- Arming: exactly 3 consecutive WHITE frames'
             echo '- FIRE: first frame after ARMED that is no longer holding-white; no wait for DARK/black'
-            echo '- Input readiness: diagnostics cannot delay the detector FIRE transition'
-            echo '- Nubia hot path: readiness is latched after successful warm-up and cleared only on real disconnect / explicit unsafe result'
-            echo '- Profiler clock: SystemClock.elapsedRealtimeNanos across app + Shizuku UserService'
-            echo '- Profiler stages: frame/callback/sampling/detection/request/Binder queue/UserService dispatch/Nubia DOWN/hold/Nubia UP'
-            echo '- Profiler history: last 64 shots with P50/P95/MAX and automatic largest-stage culprit'
-            echo '- Profiler overhead policy: primitive timestamps only on FIRE; formatting/statistics only when diagnostics UI is opened'
-            echo '- Shizuku UserService interface version: 10 (prevents stale v9 daemon reuse)'
+            echo '- Profiler v2 rule: absolute Image.timestamp is NEVER subtracted from elapsedRealtimeNanos'
+            echo '- Clock-safe app/UserService stages: SystemClock.elapsedRealtimeNanos only'
+            echo '- Foreign Image.timestamp: consecutive delta only; absolute age intentionally unavailable'
+            echo '- Capture cadence observer: PixelSampler entry interval on every processed frame, rolling 512 frames'
+            echo '- Capture stats: P50/P90/P95/P99/MAX plus cadence-incident detection'
+            echo '- FIRE history: rolling 128 shots with P50/P90/P95/P99/MAX and top decision-to-DOWN outliers'
+            echo '- AIDL semantics: app call-return and app-to-UserService arrival are named separately; no fake Binder-kernel attribution'
+            echo '- Profiler overhead: primitive timestamps/array writes on hot paths; sorting/formatting only on diagnostics read'
+            echo '- Shizuku UserService interface version: 11 (prevents stale profiler daemon reuse)'
             echo '- Tap backend: Shizuku shell -> Nubia InputManager.virtualTouchEvent -> InputReader/NubiaGamepad'
             echo '- Exactly one tap: one DOWN + one UP; no retry / backup press / Accessibility fallback'
             echo '- Requested DOWN/UP separation: ~1 ms after DOWN returns'
@@ -125,7 +127,7 @@ jobs:
                   docs/DIRECT_FIRE_STATUS.md
           git add -u docs/CI_BUILD_FAILURE.log || true
           if ! git diff --cached --quiet; then
-            git commit -m "build: publish verified ns-profiler APK from $SOURCE_SHA"
+            git commit -m "build: publish verified professional-latency APK from $SOURCE_SHA"
             git push origin HEAD:pixeltrigger-v3-shizuku
           fi
 

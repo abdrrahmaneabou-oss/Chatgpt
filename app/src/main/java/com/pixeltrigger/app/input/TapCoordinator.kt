@@ -3,13 +3,23 @@ package com.pixeltrigger.app.input
 import android.os.SystemClock
 import java.util.concurrent.atomic.AtomicLong
 
-/** Converts each detector FIRE directly into one tap request. Rebuilt after protection-gate cleanup. */
+/** Converts each detector FIRE directly into one tap request. */
 class TapCoordinator(
     private val engine: TapEngine,
 ) {
     private val ids = AtomicLong(0L)
 
-    fun fire(x: Float, y: Float, displayId: Int = 0): TapResult {
+    fun fire(
+        x: Float,
+        y: Float,
+        displayId: Int = 0,
+        frameTimestampNs: Long = 0L,
+        captureCallbackNs: Long = 0L,
+        sampleStartNs: Long = 0L,
+        sampleEndNs: Long = 0L,
+        detectionStartNs: Long = 0L,
+        fireDecisionNs: Long = 0L,
+    ): TapResult {
         val request = TapRequest(
             triggerId = ids.incrementAndGet(),
             x = x,
@@ -17,6 +27,12 @@ class TapCoordinator(
             requestedDurationMs = 1L,
             requestedAtNs = SystemClock.elapsedRealtimeNanos(),
             displayId = displayId,
+            frameTimestampNs = frameTimestampNs,
+            captureCallbackNs = captureCallbackNs,
+            sampleStartNs = sampleStartNs,
+            sampleEndNs = sampleEndNs,
+            detectionStartNs = detectionStartNs,
+            fireDecisionNs = fireDecisionNs,
         )
         return when (val result = engine.tap(request)) {
             is TapResult.Rejected -> TapResult.Failed(

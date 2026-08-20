@@ -8,7 +8,6 @@ import java.lang.reflect.Method
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.ceil
-import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
@@ -26,7 +25,7 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     constructor(@Suppress("UNUSED_PARAMETER") context: android.content.Context)
 
     @Volatile private var lastTriggerId = 0L
-    @Volatile private var lastRawImageTimestampNs = 0L // display only; NEVER used cross-clock.
+    @Volatile private var lastRawImageTimestampNs = 0L
     @Volatile private var lastCaptureProcessStartNs = 0L
     @Volatile private var lastSampleStartNs = 0L
     @Volatile private var lastSampleEndNs = 0L
@@ -146,10 +145,11 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
                 return
             }
 
-            injector = nubiaInjector ?: run {
+            val activeInjector = nubiaInjector ?: run {
                 detail = "tap ignored: Nubia injector unavailable"
                 return
             }
+            injector = activeInjector
             @Suppress("UNUSED_VARIABLE")
             val ignoredDisplayId = displayId
 
@@ -157,7 +157,7 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
             val py = y.roundToInt()
 
             lastDownCallStartNs = SystemClock.elapsedRealtimeNanos()
-            injector.send(ACTION_DOWN, px, py)
+            activeInjector.send(ACTION_DOWN, px, py)
             lastDownCallEndNs = SystemClock.elapsedRealtimeNanos()
             lastDownNs = lastDownCallEndNs
             downSent = true
@@ -168,20 +168,22 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
             }
 
             lastUpCallStartNs = SystemClock.elapsedRealtimeNanos()
-            injector.send(ACTION_UP, px, py)
+            activeInjector.send(ACTION_UP, px, py)
             lastUpCallEndNs = SystemClock.elapsedRealtimeNanos()
             lastUpNs = lastUpCallEndNs
             upSent = true
-            detail = injector.detail
+            detail = activeInjector.detail
         } catch (t: Throwable) {
             detail = "Nubia virtual-touch error: ${t.javaClass.simpleName}: ${t.message ?: "unknown"}"
         } finally {
-            if (downSent && !upSent && injector != null) {
-                runCatching {
-                    lastUpCallStartNs = SystemClock.elapsedRealtimeNanos()
-                    injector.send(ACTION_UP, x.roundToInt(), y.roundToInt())
-                    lastUpCallEndNs = SystemClock.elapsedRealtimeNanos()
-                    lastUpNs = lastUpCallEndNs
+            if (downSent && !upSent) {
+                injector?.let { activeInjector ->
+                    runCatching {
+                        lastUpCallStartNs = SystemClock.elapsedRealtimeNanos()
+                        activeInjector.send(ACTION_UP, x.roundToInt(), y.roundToInt())
+                        lastUpCallEndNs = SystemClock.elapsedRealtimeNanos()
+                        lastUpNs = lastUpCallEndNs
+                    }
                 }
             }
             recordTrace()
@@ -452,7 +454,7 @@ class ShizukuInputUserService : IShizukuInputService.Stub {
     }
 
     private class ReflectionInjector(
-        private val inputManager: Any,
+        private val inputManager: Any?,
         private val eventMethod: Method,
     ) : NubiaVirtualTouchInjector {
         override val kind: String = "cached-reflection"

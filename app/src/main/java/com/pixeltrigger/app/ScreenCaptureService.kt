@@ -195,10 +195,11 @@ class ScreenCaptureService : Service() {
 
     private fun processImage(image: Image) {
         val captureCallbackNs = SystemClock.elapsedRealtimeNanos()
+        // Image.timestamp is a foreign/source clock on this device. Keep the raw
+        // value for same-domain cadence forensics only; never subtract it from
+        // elapsedRealtimeNanos or present the result as absolute frame age.
         val imageTimestampNs = image.timestamp
-        if (imageTimestampNs > 0L && captureCallbackNs >= imageTimestampNs) {
-            lastFrameAgeNs = captureCallbackNs - imageTimestampNs
-        }
+        lastFrameAgeNs = 0L
 
         if (!engineEnabled || circleEditMode) return
 
@@ -527,7 +528,7 @@ class ScreenCaptureService : Service() {
         content.addView(quickStats, matchWrap())
 
         val profilerText = TextView(this).apply {
-            text = "🔬 Nano Latency Profiler\nنفّذ عدة طلقات ثم اضغط «تحديث تحليل التأخير»."
+            text = "🧪 Professional Latency Lab v2\nنفّذ عدة طلقات ثم افتح التحليل. لا يتم عرض أي فرق زمني بين clocks غير متزامنة."
             textSize = 11f
             setTextColor(Color.rgb(25, 25, 35))
             setPadding(dp(8), dp(8), dp(8), dp(8))
@@ -535,11 +536,11 @@ class ScreenCaptureService : Service() {
             background = roundedBackground(Color.rgb(238, 244, 255), Color.rgb(115, 145, 210), 10f)
         }
         content.addView(profilerText, matchWrap())
-        content.addView(menuButton("🔬 تحديث تحليل التأخير بالنانوثانية") {
+        content.addView(menuButton("🧪 تحديث مختبر التأخير الاحترافي") {
             quickStats.text = "Input: ${tapEngine.capability}\n${tapEngine.capabilityDetail}\n${tapEngine.latencyDetail()}\n${captureStatsText()}"
             profilerText.text = tapEngine.latencyTraceReport()
         }, matchWrap(dp(54)))
-        content.addView(menuButton("🧹 مسح سجل آخر 64 طلقة") {
+        content.addView(menuButton("🧹 مسح القياسات (512 frame / 128 shot)") {
             tapEngine.clearLatencyTraceHistory()
             profilerText.text = "تم مسح سجل القياس. نفّذ طلقات جديدة ثم حدّث التحليل."
         }, matchWrap(dp(50)))
@@ -644,7 +645,7 @@ class ScreenCaptureService : Service() {
             else -> String.format(java.util.Locale.US, "%.6fms", ns / 1_000_000.0)
         }
         return "capture=${captureWidth}x${captureHeight} (${(CAPTURE_SCALE * 100).roundToInt()}%); " +
-            "frameAge=${metric(lastFrameAgeNs)}; sampler=${metric(lastSamplerNs)}; " +
+            "absoluteFrameAge=UNSYNCED(disabled); sampler=${metric(lastSamplerNs)}; " +
             "detection=${metric(lastDetectionNs)}; fireSubmit=${metric(lastFireSubmitNs)}"
     }
 

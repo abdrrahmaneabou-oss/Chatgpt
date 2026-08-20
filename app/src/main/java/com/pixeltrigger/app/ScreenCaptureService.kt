@@ -69,6 +69,7 @@ class ScreenCaptureService : Service() {
 
     @Volatile private var lastFrameAgeNs = 0L
     @Volatile private var lastSamplerNs = 0L
+    @Volatile private var lastDetectionNs = 0L
     @Volatile private var lastFireSubmitNs = 0L
 
     private var sensorView: SensorOverlayView? = null
@@ -193,15 +194,15 @@ class ScreenCaptureService : Service() {
         }
 
     private fun processImage(image: Image) {
-        val processStartedNs = SystemClock.elapsedRealtimeNanos()
+        val captureCallbackNs = SystemClock.elapsedRealtimeNanos()
         val imageTimestampNs = image.timestamp
-        if (imageTimestampNs > 0L && processStartedNs >= imageTimestampNs) {
-            lastFrameAgeNs = processStartedNs - imageTimestampNs
+        if (imageTimestampNs > 0L && captureCallbackNs >= imageTimestampNs) {
+            lastFrameAgeNs = captureCallbackNs - imageTimestampNs
         }
 
         if (!engineEnabled || circleEditMode) return
 
-        // Input readiness is UI/input state only. It must never erase detector state.
+        // UI state only. Detection is never delayed or reset by readiness diagnostics.
         val inputReady = tapEngine.isReady()
         if (inputReady != lastInputReady) {
             lastInputReady = inputReady
@@ -229,36 +230,65 @@ class ScreenCaptureService : Service() {
         val radiusX = max(0.5f, crop.width() * screenRadius / screenWidth)
         val radiusY = max(0.5f, crop.height() * screenRadius / screenHeight)
 
-        val samplerStartedNs = SystemClock.elapsedRealtimeNanos()
+        val sampleStartNs = SystemClock.elapsedRealtimeNanos()
         val sample = PixelSampler.sampleCircularRegion(image, centerX, centerY, radiusX, radiusY) ?: return
-        lastSamplerNs = SystemClock.elapsedRealtimeNanos() - samplerStartedNs
+        val sampleEndNs = SystemClock.elapsedRealtimeNanos()
+        lastSamplerNs = sampleEndNs - sampleStartNs
 
-        // Re-check immediately before the state transition. WHITE detection/arming is
-        // never gated. DARK only consumes FIRE when the one-way Nubia path is ready.
-        val fireAllowedNow = tapEngine.isReady()
-        when (val event = detectionEngine.processSample(sample, SystemClock.elapsedRealtime(), fireAllowed = fireAllowedNow)) {
+        val detectionStartNs = SystemClock.elapsedRealtimeNanos()
+        val event = detectionEngine.processSample(sample, SystemClock.elapsedRealtime())
+        val fireDecisionNs = SystemClock.elapsedRealtimeNanos()
+        lastDetectionNs = fireDecisionNs - detectionStartNs
+
+        when (event) {
             is DetectionEngine.Event.Armed,
             is DetectionEngine.Event.Rearmed,
             is DetectionEngine.Event.ManualRearmed ->
-                updateSensorStatus(if (fireAllowedNow) SensorStatus.ARMED else SensorStatus.INPUT_NOT_READY)
+                updateSensorStatus(if (tapEngine.isReady()) SensorStatus.ARMED else SensorStatus.INPUT_NOT_READY)
+
             is DetectionEngine.Event.Fired -> {
                 val submitStartedNs = SystemClock.elapsedRealtimeNanos()
-                executeTapImmediately()
+                executeTapImmediately(
+                    frameTimestampNs = imageTimestampNs,
+                    captureCallbackNs = captureCallbackNs,
+                    sampleStartNs = sampleStartNs,
+                    sampleEndNs = sampleEndNs,
+                    detectionStartNs = detectionStartNs,
+                    fireDecisionNs = fireDecisionNs,
+                )
                 lastFireSubmitNs = SystemClock.elapsedRealtimeNanos() - submitStartedNs
                 updateSensorStatus(SensorStatus.FIRED)
             }
+
             is DetectionEngine.Event.ManualRearmTimedOut -> showMessage("لم يتم التسليح: اللون الأبيض غير موجود")
             else -> Unit
         }
     }
 
-    /** Hot path: queue one one-way Shizuku transaction and return immediately. */
-    private fun executeTapImmediately() {
+    /** Hot path: queue exactly one one-way Shizuku transaction and return. */
+    private fun executeTapImmediately(
+        frameTimestampNs: Long,
+        captureCallbackNs: Long,
+        sampleStartNs: Long,
+        sampleEndNs: Long,
+        detectionStartNs: Long,
+        fireDecisionNs: Long,
+    ) {
         if (!engineEnabled) return
         val target = targetParams ?: return
         val tapX = target.x + targetTouchSize / 2f
         val tapY = target.y + targetTouchSize / 2f
-        tapCoordinator.fire(tapX, tapY, displayId = 0)
+        tapCoordinator.fire(
+            x = tapX,
+            y = tapY,
+            displayId = 0,
+            frameTimestampNs = frameTimestampNs,
+            captureCallbackNs = captureCallbackNs,
+            sampleStartNs = sampleStartNs,
+            sampleEndNs = sampleEndNs,
+            detectionStartNs = detectionStartNs,
+            fireDecisionNs = fireDecisionNs,
+        )
     }
 
     private fun createOverlays() {
@@ -486,13 +516,33 @@ class ScreenCaptureService : Service() {
             setPadding(dp(6), dp(6), dp(6), dp(8))
         }
         content.addView(menuStatusText, matchWrap())
-        content.addView(TextView(this).apply {
+
+        val quickStats = TextView(this).apply {
             text = "Input: ${tapEngine.capability}\n${tapEngine.capabilityDetail}\n${tapEngine.latencyDetail()}\n${captureStatsText()}"
             textSize = 12f
             setTextColor(Color.rgb(70, 70, 88))
             gravity = Gravity.CENTER
             setPadding(dp(5), 0, dp(5), dp(8))
-        }, matchWrap())
+        }
+        content.addView(quickStats, matchWrap())
+
+        val profilerText = TextView(this).apply {
+            text = "🔬 Nano Latency Profiler\nنفّذ عدة طلقات ثم اضغط «تحديث تحليل التأخير»."
+            textSize = 11f
+            setTextColor(Color.rgb(25, 25, 35))
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setTextIsSelectable(true)
+            background = roundedBackground(Color.rgb(238, 244, 255), Color.rgb(115, 145, 210), 10f)
+        }
+        content.addView(profilerText, matchWrap())
+        content.addView(menuButton("🔬 تحديث تحليل التأخير بالنانوثانية") {
+            quickStats.text = "Input: ${tapEngine.capability}\n${tapEngine.capabilityDetail}\n${tapEngine.latencyDetail()}\n${captureStatsText()}"
+            profilerText.text = tapEngine.latencyTraceReport()
+        }, matchWrap(dp(54)))
+        content.addView(menuButton("🧹 مسح سجل آخر 64 طلقة") {
+            tapEngine.clearLatencyTraceHistory()
+            profilerText.text = "تم مسح سجل القياس. نفّذ طلقات جديدة ثم حدّث التحليل."
+        }, matchWrap(dp(50)))
 
         content.addView(
             actionCard(
@@ -566,8 +616,8 @@ class ScreenCaptureService : Service() {
         val margin = dp(10)
         val availableWidth = max(screenWidth - margin * 2, 1)
         val availableHeight = max(screenHeight - margin * 2, 1)
-        val width = min(dp(420), availableWidth).coerceAtLeast(min(dp(220), availableWidth))
-        val height = min(dp(600), availableHeight).coerceAtLeast(min(dp(180), availableHeight))
+        val width = min(dp(460), availableWidth).coerceAtLeast(min(dp(220), availableWidth))
+        val height = min(dp(720), availableHeight).coerceAtLeast(min(dp(180), availableHeight))
         val lp = WindowManager.LayoutParams(
             width,
             height,
@@ -587,8 +637,15 @@ class ScreenCaptureService : Service() {
     }
 
     private fun captureStatsText(): String {
-        fun ms(ns: Long): String = if (ns <= 0L) "n/a" else String.format(java.util.Locale.US, "%.3fms", ns / 1_000_000.0)
-        return "capture=${captureWidth}x${captureHeight} (${(CAPTURE_SCALE * 100).roundToInt()}%); frameAge=${ms(lastFrameAgeNs)}; sampler=${ms(lastSamplerNs)}; fireSubmit=${ms(lastFireSubmitNs)}"
+        fun metric(ns: Long): String = when {
+            ns <= 0L -> "n/a"
+            ns < 1_000L -> "${ns}ns"
+            ns < 1_000_000L -> String.format(java.util.Locale.US, "%.3fµs", ns / 1_000.0)
+            else -> String.format(java.util.Locale.US, "%.6fms", ns / 1_000_000.0)
+        }
+        return "capture=${captureWidth}x${captureHeight} (${(CAPTURE_SCALE * 100).roundToInt()}%); " +
+            "frameAge=${metric(lastFrameAgeNs)}; sampler=${metric(lastSamplerNs)}; " +
+            "detection=${metric(lastDetectionNs)}; fireSubmit=${metric(lastFireSubmitNs)}"
     }
 
     private fun attachMenuDrag(handle: View, panel: View, params: WindowManager.LayoutParams) {
@@ -697,8 +754,8 @@ class ScreenCaptureService : Service() {
             val panel = menuPanel ?: return@let
             val availableWidth = max(screenWidth - dp(20), 1)
             val availableHeight = max(screenHeight - dp(20), 1)
-            lp.width = min(dp(420), availableWidth).coerceAtLeast(min(dp(220), availableWidth))
-            lp.height = min(dp(600), availableHeight).coerceAtLeast(min(dp(180), availableHeight))
+            lp.width = min(dp(460), availableWidth).coerceAtLeast(min(dp(220), availableWidth))
+            lp.height = min(dp(720), availableHeight).coerceAtLeast(min(dp(180), availableHeight))
             clampMenuPosition(lp)
             runCatching { windowManager.updateViewLayout(panel, lp) }
         }

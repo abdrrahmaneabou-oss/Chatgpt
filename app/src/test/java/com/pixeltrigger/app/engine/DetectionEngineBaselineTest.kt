@@ -31,22 +31,12 @@ class DetectionEngineBaselineTest {
         assertEquals(DetectionEngine.State.ARMED, e.state)
     }
 
-    @Test fun whiteStillArmsWhileInputIsTemporarilyUnavailable() {
-        val e = DetectionEngine()
-        assertTrue(e.processSample(white, 1, fireAllowed = false) is DetectionEngine.Event.None)
-        assertTrue(e.processSample(white, 2, fireAllowed = false) is DetectionEngine.Event.None)
-        assertTrue(e.processSample(white, 3, fireAllowed = false) is DetectionEngine.Event.Armed)
-        assertEquals(DetectionEngine.State.ARMED, e.state)
-    }
-
-    @Test fun darkDoesNotConsumeFireWhileInputUnavailable() {
+    @Test fun legacyReadinessFlagCannotDelayDarkFire() {
         val e = DetectionEngine()
         e.processSample(white, 1)
         e.processSample(white, 2)
         e.processSample(white, 3)
-        assertTrue(e.processSample(nearBlack, 4, fireAllowed = false) is DetectionEngine.Event.None)
-        assertEquals(DetectionEngine.State.ARMED, e.state)
-        assertTrue(e.processSample(nearBlack, 5, fireAllowed = true) is DetectionEngine.Event.Fired)
+        assertTrue(e.processSample(nearBlack, 4, fireAllowed = false) is DetectionEngine.Event.Fired)
         assertEquals(DetectionEngine.State.WAITING_REARM, e.state)
     }
 

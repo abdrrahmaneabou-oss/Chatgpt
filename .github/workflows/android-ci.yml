@@ -15,7 +15,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: pixeltrigger-v3-shizuku-build
+  group: pixeltrigger-v3-shizuku-professional-lab
   cancel-in-progress: true
 
 jobs:
@@ -72,29 +72,38 @@ jobs:
           git add docs/CI_BUILD_FAILURE.log
           if ! git diff --cached --quiet; then
             git commit -m "ci: record build failure from $SOURCE_SHA"
-            git push origin HEAD:pixeltrigger-v3-shizuku
+            git push origin HEAD:pixeltrigger-v3-shizuku || true
           fi
 
       - name: Stop after compiler failure
         if: steps.gradle_build.outcome == 'failure'
         run: exit 1
 
-      - name: Publish verified APK to branch
+      - name: Publish verified Professional Lab APK to latest branch tip
         shell: bash
         run: |
           set -euo pipefail
           APK=app/build/outputs/apk/debug/app-debug.apk
           test -s "$APK"
+
+          # Preserve the exact binary built/tested from SOURCE_SHA before moving the
+          # git worktree. Another workflow is allowed to publish the generic debug APK;
+          # this workflow owns only the professional direct-fire artifact.
+          cp "$APK" /tmp/PixelTrigger-professional-lab.apk
+          BUILT_SHA=$(sha256sum /tmp/PixelTrigger-professional-lab.apk | cut -d' ' -f1)
+
+          # Publish on top of the latest remote tip so a concurrent generic build-bot
+          # commit cannot make this push non-fast-forward or overwrite this artifact.
+          git fetch origin pixeltrigger-v3-shizuku
+          git reset --hard origin/pixeltrigger-v3-shizuku
+
           mkdir -p dist docs
-          cp "$APK" dist/PixelTrigger-v3-debug.apk
-          cp "$APK" dist/PixelTrigger-v3-direct-1ms-debug.apk
-          DEBUG_SHA=$(sha256sum dist/PixelTrigger-v3-debug.apk | cut -d' ' -f1)
+          cp /tmp/PixelTrigger-professional-lab.apk dist/PixelTrigger-v3-direct-1ms-debug.apk
           DIRECT_SHA=$(sha256sum dist/PixelTrigger-v3-direct-1ms-debug.apk | cut -d' ' -f1)
-          test "$DEBUG_SHA" = "$DIRECT_SHA"
-          printf '%s  %s\n' "$DEBUG_SHA" 'dist/PixelTrigger-v3-debug.apk' > dist/PixelTrigger-v3-debug.apk.sha256
+          test "$BUILT_SHA" = "$DIRECT_SHA"
           printf '%s  %s\n' "$DIRECT_SHA" 'dist/PixelTrigger-v3-direct-1ms-debug.apk' > dist/PixelTrigger-v3-direct-1ms-debug.apk.sha256
           {
-            echo '# PixelTrigger immediate-fire + Professional Latency Lab CI status'
+            echo '# PixelTrigger immediate-fire + Professional Latency Lab v2 CI status'
             echo
             echo '- Unit tests: PASS'
             echo '- APK build: PASS (clean --rerun-tasks)'
@@ -102,13 +111,15 @@ jobs:
             echo '- Monitor diameter: 0.3 mm'
             echo '- Arming: exactly 3 consecutive WHITE frames'
             echo '- FIRE: first frame after ARMED that is no longer holding-white; no wait for DARK/black'
-            echo '- Profiler v2 rule: absolute Image.timestamp is NEVER subtracted from elapsedRealtimeNanos'
+            echo '- Profiler v2 invariant: absolute Image.timestamp is NEVER subtracted from elapsedRealtimeNanos'
             echo '- Clock-safe app/UserService stages: SystemClock.elapsedRealtimeNanos only'
-            echo '- Foreign Image.timestamp: consecutive delta only; absolute age intentionally unavailable'
+            echo '- Foreign Image.timestamp: consecutive delta only; absolute frame age intentionally unavailable'
             echo '- Capture cadence observer: PixelSampler entry interval on every processed frame, rolling 512 frames'
-            echo '- Capture stats: P50/P90/P95/P99/MAX plus cadence-incident detection'
+            echo '- Capture baseline: fixed 50 ms incident threshold during first 8 intervals, then max(50 ms, P50 x 4)'
+            echo '- Capture stats: P50/P90/P95/P99/MAX plus cadence-incident detection and clock-safe verdict'
             echo '- FIRE history: rolling 128 shots with P50/P90/P95/P99/MAX and top decision-to-DOWN outliers'
-            echo '- AIDL semantics: app call-return and app-to-UserService arrival are named separately; no fake Binder-kernel attribution'
+            echo '- AIDL semantics: app call-return and app-to-UserService arrival are separate; no fake Binder-kernel attribution'
+            echo '- Measurement boundaries are explicit: physical OLED-to-capture and exact game-consumption instant are not invented'
             echo '- Profiler overhead: primitive timestamps/array writes on hot paths; sorting/formatting only on diagnostics read'
             echo '- Shizuku UserService interface version: 11 (prevents stale profiler daemon reuse)'
             echo '- Tap backend: Shizuku shell -> Nubia InputManager.virtualTouchEvent -> InputReader/NubiaGamepad'
@@ -120,14 +131,12 @@ jobs:
 
           git config user.name 'PixelTrigger Android CI'
           git config user.email 'actions@users.noreply.github.com'
-          git add dist/PixelTrigger-v3-debug.apk \
-                  dist/PixelTrigger-v3-debug.apk.sha256 \
-                  dist/PixelTrigger-v3-direct-1ms-debug.apk \
+          git add dist/PixelTrigger-v3-direct-1ms-debug.apk \
                   dist/PixelTrigger-v3-direct-1ms-debug.apk.sha256 \
                   docs/DIRECT_FIRE_STATUS.md
           git add -u docs/CI_BUILD_FAILURE.log || true
           if ! git diff --cached --quiet; then
-            git commit -m "build: publish verified professional-latency APK from $SOURCE_SHA"
+            git commit -m "build: publish verified professional-latency-v2 APK from $SOURCE_SHA"
             git push origin HEAD:pixeltrigger-v3-shizuku
           fi
 

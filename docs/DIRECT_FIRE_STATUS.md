@@ -2,7 +2,7 @@
 
 - Unit tests: PASS
 - APK build: PASS (clean --rerun-tasks)
-- Source commit: fb504cd1206be4738057d8c0b672d193c9f564a2
+- Source commit: 1bc108fd04bb8f60bf11f094552989c72cd125a9
 - Monitor diameter: 0.3 mm
 - Arming: exactly 3 consecutive WHITE frames
 - FIRE: first frame after ARMED that is no longer holding-white; no wait for DARK/black
@@ -16,4 +16,4 @@
 - Tap backend: Shizuku shell -> Nubia InputManager.virtualTouchEvent -> InputReader/NubiaGamepad
 - Exactly one tap: one DOWN + one UP; no retry / backup press / Accessibility fallback
 - Requested DOWN/UP separation: ~1 ms after DOWN returns
-- APK SHA-256: de13a153daee3d9db03ee4df0c842fdd1f5292ab8502c15afb67c3b52bcc5ae8
+- APK SHA-256: 5beb6d0271eba91459d292976c6f8e366ecbc841f95fb55e4204bc10663ac252

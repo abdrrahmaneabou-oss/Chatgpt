@@ -57,16 +57,16 @@ jobs:
           printf '%s  %s\n' "$DEBUG_SHA" 'dist/PixelTrigger-v3-debug.apk' > dist/PixelTrigger-v3-debug.apk.sha256
           printf '%s  %s\n' "$DIRECT_SHA" 'dist/PixelTrigger-v3-direct-1ms-debug.apk' > dist/PixelTrigger-v3-direct-1ms-debug.apk.sha256
           {
-            echo '# PixelTrigger direct-fire CI status'
+            echo '# PixelTrigger immediate-fire CI status'
             echo
             echo '- Unit tests: PASS'
             echo '- APK build: PASS (clean --rerun-tasks)'
             echo "- Source commit: $SOURCE_SHA"
             echo '- Monitor diameter: 0.3 mm'
-            echo '- Arming: 3 consecutive WHITE frames; input readiness never resets detection state'
-            echo '- FIRE: first DARK/near-black frame after ARMED, only when Nubia/Shizuku input is ready'
-            echo '- Input unavailable while DARK: stays ARMED; FIRE is not consumed'
-            echo '- NEUTRAL: stays ARMED and never arms from zero'
+            echo '- Arming: exactly 3 consecutive WHITE frames'
+            echo '- FIRE: first frame after ARMED that is no longer holding-white; no wait for DARK/black'
+            echo '- Input readiness: diagnostics cannot delay the detector FIRE transition'
+            echo '- Nubia hot path: readiness is latched after successful warm-up and cleared only on real disconnect / explicit unsafe result'
             echo '- Tap backend: Shizuku shell -> Nubia InputManager.virtualTouchEvent -> InputReader/NubiaGamepad'
             echo '- Exactly one tap: one DOWN + one UP; no retry / backup press / Accessibility fallback'
             echo '- Requested DOWN/UP separation: ~1 ms after DOWN returns'
@@ -81,7 +81,7 @@ jobs:
                   dist/PixelTrigger-v3-direct-1ms-debug.apk.sha256 \
                   docs/DIRECT_FIRE_STATUS.md
           if ! git diff --cached --quiet; then
-            git commit -m "build: publish verified direct-fire APK from $SOURCE_SHA"
+            git commit -m "build: publish verified immediate-fire APK from $SOURCE_SHA"
             git push origin HEAD:pixeltrigger-v3-shizuku
           fi
 

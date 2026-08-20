@@ -14,6 +14,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: pixeltrigger-v3-shizuku-build
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -57,7 +61,7 @@ jobs:
           printf '%s  %s\n' "$DEBUG_SHA" 'dist/PixelTrigger-v3-debug.apk' > dist/PixelTrigger-v3-debug.apk.sha256
           printf '%s  %s\n' "$DIRECT_SHA" 'dist/PixelTrigger-v3-direct-1ms-debug.apk' > dist/PixelTrigger-v3-direct-1ms-debug.apk.sha256
           {
-            echo '# PixelTrigger immediate-fire CI status'
+            echo '# PixelTrigger immediate-fire + ns-profiler CI status'
             echo
             echo '- Unit tests: PASS'
             echo '- APK build: PASS (clean --rerun-tasks)'
@@ -67,6 +71,11 @@ jobs:
             echo '- FIRE: first frame after ARMED that is no longer holding-white; no wait for DARK/black'
             echo '- Input readiness: diagnostics cannot delay the detector FIRE transition'
             echo '- Nubia hot path: readiness is latched after successful warm-up and cleared only on real disconnect / explicit unsafe result'
+            echo '- Profiler clock: SystemClock.elapsedRealtimeNanos across app + Shizuku UserService'
+            echo '- Profiler stages: frame/callback/sampling/detection/request/Binder queue/UserService dispatch/Nubia DOWN/hold/Nubia UP'
+            echo '- Profiler history: last 64 shots with P50/P95/MAX and automatic largest-stage culprit'
+            echo '- Profiler overhead policy: primitive timestamps only on FIRE; formatting/statistics only when diagnostics UI is opened'
+            echo '- Shizuku UserService interface version: 10 (prevents stale v9 daemon reuse)'
             echo '- Tap backend: Shizuku shell -> Nubia InputManager.virtualTouchEvent -> InputReader/NubiaGamepad'
             echo '- Exactly one tap: one DOWN + one UP; no retry / backup press / Accessibility fallback'
             echo '- Requested DOWN/UP separation: ~1 ms after DOWN returns'
@@ -81,7 +90,7 @@ jobs:
                   dist/PixelTrigger-v3-direct-1ms-debug.apk.sha256 \
                   docs/DIRECT_FIRE_STATUS.md
           if ! git diff --cached --quiet; then
-            git commit -m "build: publish verified immediate-fire APK from $SOURCE_SHA"
+            git commit -m "build: publish verified ns-profiler APK from $SOURCE_SHA"
             git push origin HEAD:pixeltrigger-v3-shizuku
           fi
 

@@ -66,8 +66,11 @@ class ScreenCaptureService : Service() {
     private var captureHeight = 0
     private var captureDensityDpi = 0
 
-    private var sensorView: SensorOverlayView? = null
-    private var sensorParams: WindowManager.LayoutParams? = null
+    // Three fixed monitor slots. Arrays are allocated once; the capture hot path
+    // performs no collection creation while checking the three 0.3 mm probes.
+    private val sensorViews = arrayOfNulls<SensorOverlayView>(MONITOR_COUNT)
+    private val sensorParams = arrayOfNulls<WindowManager.LayoutParams>(MONITOR_COUNT)
+    private val detectionEngines = Array(MONITOR_COUNT) { DetectionEngine() }
     private var sensorVisibleDiameter = 1
     private var sensorTouchSize = 1
 
@@ -83,11 +86,9 @@ class ScreenCaptureService : Service() {
 
     private var circlesVisible = true
     @Volatile private var engineEnabled = true
-    private var configMode = false
     @Volatile private var circleEditMode = false
     private var lastInputReady = false
 
-    private val detectionEngine = DetectionEngine()
     private lateinit var tapEngine: ShizukuTapEngine
 
     private val displayListener = object : DisplayManager.DisplayListener {
@@ -105,9 +106,15 @@ class ScreenCaptureService : Service() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
         circlesVisible = preferences.getBoolean(KEY_CIRCLES_VISIBLE, true)
-        detectionEngine.whiteRearmEnabled = preferences.getBoolean(KEY_WHITE_REARM, true)
-        detectionEngine.rearmDelayEnabled = preferences.getBoolean(KEY_REARM_DELAY_ENABLED, false)
-        detectionEngine.rearmSeconds = preferences.getInt(KEY_REARM_SECONDS, 10).coerceIn(5, 60)
+
+        val whiteRearm = preferences.getBoolean(KEY_WHITE_REARM, true)
+        val delayEnabled = preferences.getBoolean(KEY_REARM_DELAY_ENABLED, false)
+        val rearmSeconds = preferences.getInt(KEY_REARM_SECONDS, 10).coerceIn(5, 60)
+        detectionEngines.forEach { engine ->
+            engine.whiteRearmEnabled = whiteRearm
+            engine.rearmDelayEnabled = delayEnabled
+            engine.rearmSeconds = rearmSeconds
+        }
 
         tapEngine = ShizukuTapEngine(this)
         tapEngine.connect()
@@ -168,7 +175,8 @@ class ScreenCaptureService : Service() {
         )
         mainHandler.post {
             createOverlays()
-            updateSensorStatus(if (tapEngine.isReady()) SensorStatus.WAITING else SensorStatus.INPUT_NOT_READY)
+            lastInputReady = tapEngine.isReady()
+            refreshSensorStatuses(lastInputReady)
         }
     }
 
@@ -188,24 +196,61 @@ class ScreenCaptureService : Service() {
     private fun processImage(image: Image) {
         if (!engineEnabled || circleEditMode) return
 
-        // Input readiness is UI/input state only. It must never erase detector state.
         val inputReady = tapEngine.isReady()
         if (inputReady != lastInputReady) {
             lastInputReady = inputReady
-            val status = when {
-                !inputReady -> SensorStatus.INPUT_NOT_READY
-                detectionEngine.state == DetectionEngine.State.ARMED -> SensorStatus.ARMED
-                detectionEngine.state == DetectionEngine.State.WAITING_REARM -> SensorStatus.FIRED
-                else -> SensorStatus.WAITING
-            }
-            updateSensorStatus(status)
+            refreshSensorStatuses(inputReady)
         }
 
-        val params = sensorParams ?: return
         if (screenWidth <= 0 || screenHeight <= 0) return
         val crop = image.cropRect
         if (crop.width() <= 0 || crop.height() <= 0) return
 
+        val nowMs = SystemClock.elapsedRealtime()
+        var i = 0
+        var statusChanged = false
+        var manualTimeout = false
+        while (i < MONITOR_COUNT) {
+            val params = sensorParams[i]
+            if (params != null) {
+                val sample = sampleSensor(image, crop, params)
+                if (sample != null) {
+                    when (detectionEngines[i].processSample(sample, nowMs)) {
+                        is DetectionEngine.Event.Armed,
+                        is DetectionEngine.Event.Rearmed,
+                        is DetectionEngine.Event.ManualRearmed -> statusChanged = true
+
+                        is DetectionEngine.Event.Fired -> {
+                            // Exactly one winning sensor may submit the tap. The two
+                            // siblings are synchronized immediately before returning,
+                            // so they cannot emit duplicate DOWN events on this shot.
+                            var sibling = 0
+                            while (sibling < MONITOR_COUNT) {
+                                if (sibling != i) detectionEngines[sibling].synchronizeAfterExternalFire(nowMs)
+                                sibling++
+                            }
+                            executeTapImmediately()
+                            refreshSensorStatuses(inputReady, forced = SensorStatus.FIRED)
+                            return
+                        }
+
+                        is DetectionEngine.Event.ManualRearmTimedOut -> manualTimeout = true
+                        else -> Unit
+                    }
+                }
+            }
+            i++
+        }
+
+        if (statusChanged) refreshSensorStatuses(inputReady)
+        if (manualTimeout) showMessage("لم يتم التسليح: اللون الأبيض غير موجود")
+    }
+
+    private fun sampleSensor(
+        image: Image,
+        crop: Rect,
+        params: WindowManager.LayoutParams,
+    ): DetectionEngine.ColorSample? {
         val screenCenterX = params.x + sensorTouchSize / 2
         val screenCenterY = params.y + sensorTouchSize / 2
         val centerX = (crop.left + (screenCenterX * crop.width().toFloat() / screenWidth)).roundToInt()
@@ -215,23 +260,7 @@ class ScreenCaptureService : Service() {
         val screenRadius = sensorVisibleDiameter / 2f
         val radiusX = max(0.5f, crop.width() * screenRadius / screenWidth)
         val radiusY = max(0.5f, crop.height() * screenRadius / screenHeight)
-
-        val sample = PixelSampler.sampleCircularRegion(image, centerX, centerY, radiusX, radiusY) ?: return
-
-        // No profiler timestamps, no second readiness read, and no diagnostic gate in
-        // the detector hot path. Predictive white-loss can submit FIRE immediately.
-        when (val event = detectionEngine.processSample(sample, SystemClock.elapsedRealtime())) {
-            is DetectionEngine.Event.Armed,
-            is DetectionEngine.Event.Rearmed,
-            is DetectionEngine.Event.ManualRearmed ->
-                updateSensorStatus(if (inputReady) SensorStatus.ARMED else SensorStatus.INPUT_NOT_READY)
-            is DetectionEngine.Event.Fired -> {
-                executeTapImmediately()
-                updateSensorStatus(SensorStatus.FIRED)
-            }
-            is DetectionEngine.Event.ManualRearmTimedOut -> showMessage("لم يتم التسليح: اللون الأبيض غير موجود")
-            else -> Unit
-        }
+        return PixelSampler.sampleCircularRegion(image, centerX, centerY, radiusX, radiusY)
     }
 
     /** Hot path: queue one one-way Shizuku transaction and return immediately. */
@@ -244,23 +273,38 @@ class ScreenCaptureService : Service() {
     }
 
     private fun createOverlays() {
-        if (sensorView != null) return
+        if (sensorViews[0] != null) return
         sensorVisibleDiameter = max(mmToPx(MONITOR_DIAMETER_MM), 1)
         val targetVisibleDiameter = max(mmToPx(5f), dp(12))
 
-        val sensor = SensorOverlayView(this, sensorVisibleDiameter)
-        sensorView = sensor
-        sensorTouchSize = max(dp(48), sensor.outerDiameterPx + dp(30))
-        val sensorLp = overlayParams(sensorTouchSize, sensorTouchSize).apply {
-            x = preferences.getInt(KEY_SENSOR_X, screenWidth / 2 - sensorTouchSize / 2)
-            y = preferences.getInt(KEY_SENSOR_Y, screenHeight / 2 - sensorTouchSize / 2)
-        }
-        sensorParams = sensorLp
-        clampCirclePosition(sensorLp, sensorVisibleDiameter)
-        windowManager.addView(sensor, sensorLp)
-        attachDrag(sensor, sensorLp, sensor.outerDiameterPx) { x, y ->
-            detectionEngine.resetForSensorMove()
-            preferences.edit().putInt(KEY_SENSOR_X, x).putInt(KEY_SENSOR_Y, y).apply()
+        var i = 0
+        while (i < MONITOR_COUNT) {
+            val sensor = SensorOverlayView(this, sensorVisibleDiameter)
+            if (i == 0) sensorTouchSize = max(dp(48), sensor.outerDiameterPx + dp(30))
+            sensorViews[i] = sensor
+
+            val defaultX = when (i) {
+                0 -> screenWidth / 2 - sensorTouchSize / 2
+                1 -> screenWidth / 2 - sensorTouchSize / 2 - dp(56)
+                else -> screenWidth / 2 - sensorTouchSize / 2 + dp(56)
+            }
+            val defaultY = screenHeight / 2 - sensorTouchSize / 2
+            val sensorLp = overlayParams(sensorTouchSize, sensorTouchSize).apply {
+                x = preferences.getInt(sensorKeyX(i), defaultX)
+                y = preferences.getInt(sensorKeyY(i), defaultY)
+            }
+            sensorParams[i] = sensorLp
+            clampCirclePosition(sensorLp, sensorVisibleDiameter)
+            windowManager.addView(sensor, sensorLp)
+            val sensorIndex = i
+            attachDrag(sensor, sensorLp, sensor.outerDiameterPx) { x, y ->
+                detectionEngines[sensorIndex].resetForSensorMove()
+                preferences.edit()
+                    .putInt(sensorKeyX(sensorIndex), x)
+                    .putInt(sensorKeyY(sensorIndex), y)
+                    .apply()
+            }
+            i++
         }
 
         targetTouchSize = max(dp(52), dp(24) + targetVisibleDiameter)
@@ -301,13 +345,22 @@ class ScreenCaptureService : Service() {
         updateButtonVisual()
     }
 
-    /** Sensor/target do not consume gameplay touches unless the menu is intentionally open. */
     private fun setConfigurationTouchability(enabled: Boolean) {
-        configMode = enabled
-        listOf(sensorView to sensorParams, targetView to targetParams).forEach { (view, lp) ->
-            if (view == null || lp == null) return@forEach
-            lp.flags = if (enabled) baseOverlayFlags() else baseOverlayFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            runCatching { windowManager.updateViewLayout(view, lp) }
+        var i = 0
+        while (i < MONITOR_COUNT) {
+            val view = sensorViews[i]
+            val lp = sensorParams[i]
+            if (view != null && lp != null) {
+                lp.flags = if (enabled) baseOverlayFlags() else baseOverlayFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                runCatching { windowManager.updateViewLayout(view, lp) }
+            }
+            i++
+        }
+        targetView?.let { view ->
+            targetParams?.let { lp ->
+                lp.flags = if (enabled) baseOverlayFlags() else baseOverlayFlags() or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                runCatching { windowManager.updateViewLayout(view, lp) }
+            }
         }
     }
 
@@ -384,16 +437,52 @@ class ScreenCaptureService : Service() {
         setCirclesVisible(true)
         setConfigurationTouchability(true)
         updateButtonVisual()
-        showMessage("اسحب الدائرتين إلى الموضع المطلوب، ثم اضغط ✓ للحفظ")
+        showMessage("اسحب دوائر المراقبة الثلاث ودائرة الضغط، ثم اضغط ✓ للحفظ")
     }
 
     private fun finishCirclePositionEditing() {
         if (!circleEditMode) return
         circleEditMode = false
         setConfigurationTouchability(false)
-        captureHandler?.post { detectionEngine.resetForSensorMove() }
+        resetAllDetectors()
         updateButtonVisual()
         showMessage("تم حفظ مواضع الدوائر")
+    }
+
+    private fun resetMonitorCirclesToCenter() {
+        closeMenu()
+        setCirclesVisible(true)
+        val x = screenWidth / 2 - sensorTouchSize / 2
+        val y = screenHeight / 2 - sensorTouchSize / 2
+        val editor = preferences.edit()
+        var i = 0
+        while (i < MONITOR_COUNT) {
+            val lp = sensorParams[i]
+            val view = sensorViews[i]
+            if (lp != null && view != null) {
+                lp.x = x
+                lp.y = y
+                clampCirclePosition(lp, sensorVisibleDiameter)
+                runCatching { windowManager.updateViewLayout(view, lp) }
+                editor.putInt(sensorKeyX(i), lp.x).putInt(sensorKeyY(i), lp.y)
+            }
+            i++
+        }
+        editor.apply()
+        resetAllDetectors()
+        refreshSensorStatuses(tapEngine.isReady())
+        showMessage("تمت إعادة دوائر المراقبة الثلاث إلى منتصف الشاشة")
+    }
+
+    private fun resetAllDetectors() {
+        val task = Runnable {
+            var i = 0
+            while (i < MONITOR_COUNT) {
+                detectionEngines[i].resetForSensorMove()
+                i++
+            }
+        }
+        captureHandler?.post(task) ?: task.run()
     }
 
     private fun toggleEngine() {
@@ -401,17 +490,36 @@ class ScreenCaptureService : Service() {
         engineEnabled = false
 
         if (!enableRequested) {
-            captureHandler?.post { detectionEngine.resetForSensorMove() }
-            updateSensorStatus(SensorStatus.OFF)
+            resetAllDetectors()
+            refreshSensorStatuses(lastInputReady, forced = SensorStatus.OFF)
             return
         }
 
         val restart = Runnable {
-            detectionEngine.resetForSensorMove()
+            var i = 0
+            while (i < MONITOR_COUNT) {
+                detectionEngines[i].resetForSensorMove()
+                i++
+            }
             engineEnabled = true
-            updateSensorStatus(if (tapEngine.isReady()) SensorStatus.WAITING else SensorStatus.INPUT_NOT_READY)
+            lastInputReady = tapEngine.isReady()
+            refreshSensorStatuses(lastInputReady)
         }
         captureHandler?.post(restart) ?: restart.run()
+    }
+
+    private fun aggregateState(): DetectionEngine.State {
+        var anyRearm = false
+        var i = 0
+        while (i < MONITOR_COUNT) {
+            when (detectionEngines[i].state) {
+                DetectionEngine.State.ARMED -> return DetectionEngine.State.ARMED
+                DetectionEngine.State.WAITING_REARM -> anyRearm = true
+                else -> Unit
+            }
+            i++
+        }
+        return if (anyRearm) DetectionEngine.State.WAITING_REARM else DetectionEngine.State.WAITING_FOR_WHITE
     }
 
     private fun updateButtonVisual() {
@@ -420,7 +528,7 @@ class ScreenCaptureService : Service() {
             circleEditMode -> Color.rgb(30, 165, 92)
             !engineEnabled -> Color.rgb(95, 95, 104)
             tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> Color.rgb(165, 70, 190)
-            detectionEngine.state == DetectionEngine.State.ARMED -> Color.rgb(32, 170, 88)
+            aggregateState() == DetectionEngine.State.ARMED -> Color.rgb(32, 170, 88)
             else -> Color.rgb(91, 54, 221)
         }
         button.text = when {
@@ -479,18 +587,26 @@ class ScreenCaptureService : Service() {
         content.addView(
             actionCard(
                 "تعديل مواضع الدوائر",
-                "اسحب دائرة المراقبة ودائرة الضغط لأي موضع على الشاشة، ثم اضغط ✓ للحفظ.",
+                "اسحب دوائر المراقبة الثلاث ودائرة الضغط لأي موضع، ثم اضغط ✓ للحفظ.",
             ) { beginCirclePositionEditing() },
+            matchWrap(dp(88)),
+        )
+        content.addView(
+            actionCard(
+                "إعادة دوائر المراقبة إلى المنتصف",
+                "يعيد مراكز دوائر 0.3 mm الثلاث إلى مركز الشاشة تمامًا. دائرة الضغط لا تتحرك.",
+            ) { resetMonitorCirclesToCenter() },
             matchWrap(dp(88)),
         )
         content.addView(menuButton("إظهار / إخفاء الدوائر") { setCirclesVisible(!circlesVisible) }, matchWrap(dp(50)))
 
+        val primaryEngine = detectionEngines[0]
         val whiteSwitch = Switch(this).apply {
             text = "إعادة التسليح عند ظهور الأبيض"
-            isChecked = detectionEngine.whiteRearmEnabled
+            isChecked = primaryEngine.whiteRearmEnabled
             setTextColor(Color.rgb(30, 30, 36))
             setOnCheckedChangeListener { _, checked ->
-                detectionEngine.whiteRearmEnabled = checked
+                detectionEngines.forEach { it.whiteRearmEnabled = checked }
                 preferences.edit().putBoolean(KEY_WHITE_REARM, checked).apply()
             }
         }
@@ -498,40 +614,47 @@ class ScreenCaptureService : Service() {
 
         val delaySwitch = Switch(this).apply {
             text = "تأخير إعادة التسليح"
-            isChecked = detectionEngine.rearmDelayEnabled
+            isChecked = primaryEngine.rearmDelayEnabled
             setTextColor(Color.rgb(30, 30, 36))
             setOnCheckedChangeListener { _, checked ->
-                detectionEngine.rearmDelayEnabled = checked
+                detectionEngines.forEach { it.rearmDelayEnabled = checked }
                 preferences.edit().putBoolean(KEY_REARM_DELAY_ENABLED, checked).apply()
             }
         }
         content.addView(delaySwitch, matchWrap(dp(54)))
 
         val secondsText = TextView(this).apply {
-            text = "${detectionEngine.rearmSeconds} ثانية"
+            text = "${primaryEngine.rearmSeconds} ثانية"
             gravity = Gravity.CENTER
             setTextColor(Color.rgb(30, 30, 36))
             textSize = 16f
         }
         val durationRow = LinearLayout(this).apply { gravity = Gravity.CENTER }
         durationRow.addView(menuButton("−") {
-            detectionEngine.rearmSeconds = (detectionEngine.rearmSeconds - 1).coerceIn(5, 60)
-            preferences.edit().putInt(KEY_REARM_SECONDS, detectionEngine.rearmSeconds).apply()
-            secondsText.text = "${detectionEngine.rearmSeconds} ثانية"
+            val seconds = (detectionEngines[0].rearmSeconds - 1).coerceIn(5, 60)
+            detectionEngines.forEach { it.rearmSeconds = seconds }
+            preferences.edit().putInt(KEY_REARM_SECONDS, seconds).apply()
+            secondsText.text = "$seconds ثانية"
         }, LinearLayout.LayoutParams(dp(62), dp(48)))
         durationRow.addView(secondsText, LinearLayout.LayoutParams(0, dp(48), 1f))
         durationRow.addView(menuButton("+") {
-            detectionEngine.rearmSeconds = (detectionEngine.rearmSeconds + 1).coerceIn(5, 60)
-            preferences.edit().putInt(KEY_REARM_SECONDS, detectionEngine.rearmSeconds).apply()
-            secondsText.text = "${detectionEngine.rearmSeconds} ثانية"
+            val seconds = (detectionEngines[0].rearmSeconds + 1).coerceIn(5, 60)
+            detectionEngines.forEach { it.rearmSeconds = seconds }
+            preferences.edit().putInt(KEY_REARM_SECONDS, seconds).apply()
+            secondsText.text = "$seconds ثانية"
         }, LinearLayout.LayoutParams(dp(62), dp(48)))
         content.addView(durationRow, matchWrap(dp(54)))
 
         content.addView(menuButton("تفعيل التسليح الآن لمرة واحدة") {
             captureHandler?.post {
-                if (!detectionEngine.requestOneTimeRearmOverride(SystemClock.elapsedRealtime())) {
-                    showMessage("لا يوجد تأخير جارٍ يمكن تجاوزه")
+                val now = SystemClock.elapsedRealtime()
+                var requested = false
+                var i = 0
+                while (i < MONITOR_COUNT) {
+                    requested = detectionEngines[i].requestOneTimeRearmOverride(now) || requested
+                    i++
                 }
+                if (!requested) showMessage("لا يوجد تأخير جارٍ يمكن تجاوزه")
             }
             closeMenu()
         }, matchWrap(dp(50)))
@@ -569,7 +692,7 @@ class ScreenCaptureService : Service() {
     }
 
     private fun captureStatsText(): String =
-        "capture=${captureWidth}x${captureHeight} (${(CAPTURE_SCALE * 100).roundToInt()}%); predictive white-loss; profiler=OFF"
+        "capture=${captureWidth}x${captureHeight} (${(CAPTURE_SCALE * 100).roundToInt()}%); 3x0.3mm PixelProbe; profiler=OFF"
 
     private fun attachMenuDrag(handle: View, panel: View, params: WindowManager.LayoutParams) {
         var grabOffsetX = 0f
@@ -621,21 +744,37 @@ class ScreenCaptureService : Service() {
     private fun setCirclesVisible(visible: Boolean) {
         circlesVisible = visible
         preferences.edit().putBoolean(KEY_CIRCLES_VISIBLE, visible).apply()
-        sensorView?.visibility = if (visible) View.VISIBLE else View.INVISIBLE
+        var i = 0
+        while (i < MONITOR_COUNT) {
+            sensorViews[i]?.visibility = if (visible) View.VISIBLE else View.INVISIBLE
+            i++
+        }
         targetView?.visibility = if (visible) View.VISIBLE else View.INVISIBLE
     }
 
     private fun engineStatusText(): String = when {
         !engineEnabled -> "المحرك: OFF — انقر مرتين بسرعة على PT للتشغيل"
         tapEngine.capability != InputCapability.CONCURRENT_TOUCH_SAFE -> "المحرك: ينتظر Shizuku الآمن"
-        detectionEngine.state == DetectionEngine.State.ARMED -> "المحرك: ARMED"
-        detectionEngine.state == DetectionEngine.State.WAITING_REARM -> "المحرك: WAITING_REARM"
+        aggregateState() == DetectionEngine.State.ARMED -> "المحرك: ARMED — أحد الحساسات أو أكثر مسلح"
+        aggregateState() == DetectionEngine.State.WAITING_REARM -> "المحرك: WAITING_REARM"
         else -> "المحرك: WAITING_FOR_WHITE"
     }
 
-    private fun updateSensorStatus(status: SensorStatus) {
+    private fun sensorStatusFor(engine: DetectionEngine, inputReady: Boolean): SensorStatus = when {
+        !engineEnabled -> SensorStatus.OFF
+        !inputReady -> SensorStatus.INPUT_NOT_READY
+        engine.state == DetectionEngine.State.ARMED -> SensorStatus.ARMED
+        engine.state == DetectionEngine.State.WAITING_REARM -> SensorStatus.FIRED
+        else -> SensorStatus.WAITING
+    }
+
+    private fun refreshSensorStatuses(inputReady: Boolean, forced: SensorStatus? = null) {
         mainHandler.post {
-            sensorView?.setStatus(status)
+            var i = 0
+            while (i < MONITOR_COUNT) {
+                sensorViews[i]?.setStatus(forced ?: sensorStatusFor(detectionEngines[i], inputReady))
+                i++
+            }
             updateButtonVisual()
             menuStatusText?.text = engineStatusText()
         }
@@ -658,11 +797,22 @@ class ScreenCaptureService : Service() {
             virtualDisplay?.resize(captureWidth, captureHeight, captureDensityDpi)
             virtualDisplay?.surface = replacement.surface
             old?.close()
-            detectionEngine.resetForSensorMove()
+            var i = 0
+            while (i < MONITOR_COUNT) {
+                detectionEngines[i].resetForSensorMove()
+                i++
+            }
         }
-        sensorParams?.let { lp ->
-            clampCirclePosition(lp, sensorVisibleDiameter)
-            sensorView?.let { runCatching { windowManager.updateViewLayout(it, lp) } }
+
+        var i = 0
+        while (i < MONITOR_COUNT) {
+            val lp = sensorParams[i]
+            val view = sensorViews[i]
+            if (lp != null && view != null) {
+                clampCirclePosition(lp, sensorVisibleDiameter)
+                runCatching { windowManager.updateViewLayout(view, lp) }
+            }
+            i++
         }
         targetParams?.let { lp ->
             val visibleDiameter = max(mmToPx(5f), dp(12))
@@ -771,6 +921,18 @@ class ScreenCaptureService : Service() {
         return (mm * dpi / 25.4f).roundToInt()
     }
 
+    private fun sensorKeyX(index: Int): String = when (index) {
+        0 -> KEY_SENSOR_X
+        1 -> KEY_SENSOR_2_X
+        else -> KEY_SENSOR_3_X
+    }
+
+    private fun sensorKeyY(index: Int): String = when (index) {
+        0 -> KEY_SENSOR_Y
+        1 -> KEY_SENSOR_2_Y
+        else -> KEY_SENSOR_3_Y
+    }
+
     private fun showMessage(message: String) {
         mainHandler.post { Toast.makeText(this, message, Toast.LENGTH_SHORT).show() }
     }
@@ -787,7 +949,7 @@ class ScreenCaptureService : Service() {
     private fun buildNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_menu_view)
         .setContentTitle("PixelTrigger")
-        .setContentText("مراقبة البكسل فعّالة — Ultra-low latency / Shizuku")
+        .setContentText("3× PixelProbe 0.3 mm فعالة — Ultra-low latency / Shizuku")
         .setOngoing(true)
         .build()
 
@@ -799,7 +961,12 @@ class ScreenCaptureService : Service() {
     override fun onDestroy() {
         (getSystemService(DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(displayListener)
         closeMenu()
-        listOf(sensorView, targetView, menuButton).forEach { view -> if (view != null) runCatching { windowManager.removeView(view) } }
+        var i = 0
+        while (i < MONITOR_COUNT) {
+            sensorViews[i]?.let { runCatching { windowManager.removeView(it) } }
+            i++
+        }
+        listOf(targetView, menuButton).forEach { view -> if (view != null) runCatching { windowManager.removeView(view) } }
         virtualDisplay?.release()
         imageReader?.close()
         mediaProjection?.stop()
@@ -821,11 +988,19 @@ class ScreenCaptureService : Service() {
         private const val CHANNEL_ID = "pixeltrigger_monitor"
         private const val NOTIFICATION_ID = 41
         private const val PREFS_NAME = "pixeltrigger_prefs"
+        private const val MONITOR_COUNT = 3
         private const val MONITOR_DIAMETER_MM = 0.3f
         private const val CAPTURE_SCALE = 0.5f
         private const val DISPLAY_REFRESH_DEBOUNCE_MS = 16L
+
+        // Sensor 1 keeps the legacy keys so the user's existing position survives
+        // the upgrade. Sensors 2 and 3 get their own persistent positions.
         private const val KEY_SENSOR_X = "sensor_x"
         private const val KEY_SENSOR_Y = "sensor_y"
+        private const val KEY_SENSOR_2_X = "sensor_2_x"
+        private const val KEY_SENSOR_2_Y = "sensor_2_y"
+        private const val KEY_SENSOR_3_X = "sensor_3_x"
+        private const val KEY_SENSOR_3_Y = "sensor_3_y"
         private const val KEY_TARGET_X = "target_x"
         private const val KEY_TARGET_Y = "target_y"
         private const val KEY_BUTTON_X = "button_x"

@@ -47,10 +47,6 @@ class DetectionEngine(
             else -> 0
         }
 
-        /**
-         * v4 hot decision: compare a maximum of five fixed RGB points against
-         * the baseline established during the 3 WHITE arming frames.
-         */
         fun isProbeDepartureFrom(reference: ColorSample): Boolean {
             val count = minOf(probeCount, reference.probeCount, MAX_PROBE_POINTS)
             if (count <= 0) return false
@@ -68,7 +64,6 @@ class DetectionEngine(
             return false
         }
 
-        /** Compatibility fallback for non-v4 samples/tests. */
         fun isPredictiveWhiteLossFrom(reference: ColorSample): Boolean {
             val coverageDrop = reference.whiteRatio - whiteRatio
             if (coverageDrop >= PREDICTIVE_WHITE_COVERAGE_DROP) return true
@@ -184,6 +179,19 @@ class DetectionEngine(
         state = State.WAITING_FOR_WHITE
         clearOneTimeRearmRequest()
         armedWhiteSample = null
+        resetWhiteSequence()
+    }
+
+    /**
+     * Multi-sensor synchronization hook. When any sibling sensor fires, the
+     * remaining detectors enter the same WAITING_REARM epoch without emitting
+     * another FIRE. No timing wait or extra frame is added to the winning path.
+     */
+    fun synchronizeAfterExternalFire(nowMs: Long) {
+        state = State.WAITING_REARM
+        clearOneTimeRearmRequest()
+        armedWhiteSample = null
+        firedAtMs = nowMs
         resetWhiteSequence()
     }
 
@@ -371,8 +379,6 @@ class DetectionEngine(
         const val MIN_CHANGE_CHROMA_RISE = 24
         const val MIN_CHANGE_WHITE_COVERAGE_DROP = 0.35f
 
-        // Exact user-selected maximum luminance for FIRE. Anything above 90 is
-        // treated as too light and leaves the detector ARMED.
         const val FIRE_MAX_LUMINANCE = 90
 
         const val DARK_PIXEL_MAX_LUMINANCE = 88

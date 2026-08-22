@@ -1,13 +1,11 @@
 # PixelTrigger v4 PixelProbe status
-
 - Unit tests: PASS
 - APK build: PASS (clean --rerun-tasks)
-- Source commit: adbe92cd2243ce4e0926ddcafcaf4264848f68f8
+- Source commit: c5609c2d3f00416a70ec07abcb891defe8f02266
 - Monitor diameter: exactly 0.3 mm
+- Sampler: maximum 5 fixed direct RGB probe points inside 0.3 mm ellipse
 - Arming: exactly 3 consecutive WHITE frames
-- FIRE gate: meaningful v4 probe departure AND average luminance <= 90
-- Luminance >= 91 stays ARMED and does not FIRE
-- No debounce / timer / extra-frame wait in FIRE gate
+- FIRE: first changed frame reaching v4 quorum
 - Input: one oneway Shizuku AIDL -> Nubia virtualTouchEvent
 - No Accessibility fallback / retry / second DOWN
-- APK SHA-256: cd254b0b0d267ff58e26937846f268924b65aaabb1139d9640821e23640f7844
+- APK SHA-256: b186e86f8ca0295e8d975eb46d64e5e8e8ce2309647b59ffc7a9c260117b0e63

@@ -66,7 +66,7 @@ class ScreenCaptureService : Service() {
     private var captureHeight = 0
     private var captureDensityDpi = 0
 
-    // 3 groups x 3 monitors = 9 persisted monitor circles. Only the active
+    // 4 groups x 3 monitors = 12 persisted monitor circles. Only the active
     // group's three entries are sampled in processImage(), so the capture hot
     // path keeps the same three-probe workload as the previous build.
     private val sensorViews = arrayOfNulls<SensorOverlayView>(TOTAL_MONITOR_COUNT)
@@ -216,7 +216,7 @@ class ScreenCaptureService : Service() {
         var statusChanged = false
         var manualTimeout = false
 
-        // Exactly three probes are sampled per frame. The other six monitor
+        // Exactly three probes are sampled per frame. The other nine monitor
         // circles are persisted UI state only while their groups are inactive.
         while (local < MONITORS_PER_GROUP) {
             val index = base + local
@@ -684,7 +684,7 @@ class ScreenCaptureService : Service() {
         content.addView(
             actionCard(
                 "إعادة المجموعة ${activeGroup + 1} إلى المنتصف",
-                "يعيد دوائر 0.3 mm الثلاث للمجموعة الحالية فقط إلى مركز الشاشة. المجموعتان الأخريان ودائرة الضغط لا تتغير.",
+                "يعيد دوائر 0.3 mm الثلاث للمجموعة الحالية فقط إلى مركز الشاشة. المجموعات الثلاث الأخرى ودائرة الضغط لا تتغير.",
             ) { resetMonitorCirclesToCenter() },
             matchWrap(dp(96)),
         )
@@ -783,7 +783,7 @@ class ScreenCaptureService : Service() {
     }
 
     private fun captureStatsText(): String =
-        "capture=${captureWidth}x${captureHeight} (${(CAPTURE_SCALE * 100).roundToInt()}%); group=${activeGroup + 1}; active=3/9 PixelProbe 0.3mm; profiler=OFF"
+        "capture=${captureWidth}x${captureHeight} (${(CAPTURE_SCALE * 100).roundToInt()}%); group=${activeGroup + 1}; active=3/12 PixelProbe 0.3mm; profiler=OFF"
 
     private fun attachMenuDrag(handle: View, panel: View, params: WindowManager.LayoutParams) {
         var grabOffsetX = 0f
@@ -1021,7 +1021,7 @@ class ScreenCaptureService : Service() {
     private fun groupBaseIndex(group: Int): Int = group * MONITORS_PER_GROUP
 
     // Preserve the previous three-position keys as group 1 so upgrading keeps
-    // the user's existing placement. Groups 2 and 3 use generated independent keys.
+    // the user's existing placement. Groups 2, 3 and 4 use generated independent keys.
     private fun sensorKeyX(group: Int, local: Int): String = if (group == 0) {
         when (local) {
             0 -> KEY_SENSOR_X
@@ -1058,7 +1058,7 @@ class ScreenCaptureService : Service() {
     private fun buildNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.ic_menu_view)
         .setContentTitle("PixelTrigger")
-        .setContentText("3/9 PixelProbe 0.3 mm فعالة — Ultra-low latency / Shizuku")
+        .setContentText("3/12 PixelProbe 0.3 mm فعالة — Ultra-low latency / Shizuku")
         .setOngoing(true)
         .build()
 
@@ -1101,7 +1101,7 @@ class ScreenCaptureService : Service() {
         private const val NOTIFICATION_ID = 41
         private const val PREFS_NAME = "pixeltrigger_prefs"
 
-        private const val GROUP_COUNT = 3
+        private const val GROUP_COUNT = 4
         private const val MONITORS_PER_GROUP = 3
         private const val TOTAL_MONITOR_COUNT = GROUP_COUNT * MONITORS_PER_GROUP
         private const val MONITOR_DIAMETER_MM = 0.3f

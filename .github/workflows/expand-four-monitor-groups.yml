@@ -1,0 +1,71 @@
+name: One-shot expand PixelTrigger to four monitor groups
+
+on:
+  push:
+    branches:
+      - pixeltrigger-v4-pixelprobe
+    paths:
+      - .github/workflows/expand-four-monitor-groups.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PixelProbe v4 branch
+        uses: actions/checkout@v4
+        with:
+          ref: pixeltrigger-v4-pixelprobe
+          fetch-depth: 0
+
+      - name: Expand to four persisted monitor groups
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt')
+          text = path.read_text(encoding='utf-8')
+
+          replacements = [
+              ('// 3 groups x 3 monitors = 9 persisted monitor circles. Only the active',
+               '// 4 groups x 3 monitors = 12 persisted monitor circles. Only the active'),
+              ('// Exactly three probes are sampled per frame. The other six monitor',
+               '// Exactly three probes are sampled per frame. The other nine monitor'),
+              ('المجموعتان الأخريان ودائرة الضغط لا تتغير.',
+               'المجموعات الثلاث الأخرى ودائرة الضغط لا تتغير.'),
+              ('active=3/9 PixelProbe 0.3mm', 'active=3/12 PixelProbe 0.3mm'),
+              ('// the user\'s existing placement. Groups 2 and 3 use generated independent keys.',
+               '// the user\'s existing placement. Groups 2, 3 and 4 use generated independent keys.'),
+              ('3/9 PixelProbe 0.3 mm فعالة', '3/12 PixelProbe 0.3 mm فعالة'),
+              ('private const val GROUP_COUNT = 3', 'private const val GROUP_COUNT = 4'),
+          ]
+
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f'Expected source fragment not found: {old!r}')
+              text = text.replace(old, new)
+
+          if 'private const val GROUP_COUNT = 4' not in text:
+              raise SystemExit('GROUP_COUNT did not become 4')
+          if 'active=3/12 PixelProbe 0.3mm' not in text:
+              raise SystemExit('Capture status did not become 3/12')
+          if '3/12 PixelProbe 0.3 mm فعالة' not in text:
+              raise SystemExit('Notification did not become 3/12')
+
+          path.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Commit four-group source and remove one-shot workflow
+        shell: bash
+        run: |
+          git config user.name "PixelTrigger v4 CI"
+          git config user.email "actions@users.noreply.github.com"
+          git rm .github/workflows/expand-four-monitor-groups.yml
+          git add app/src/main/java/com/pixeltrigger/app/ScreenCaptureService.kt
+          git diff --cached --check
+          git commit -m "feat: expand PixelTrigger to four monitor groups"
+          git push origin HEAD:pixeltrigger-v4-pixelprobe

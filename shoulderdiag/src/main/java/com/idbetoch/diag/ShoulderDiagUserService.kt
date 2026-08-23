@@ -8,7 +8,6 @@ import android.os.SystemClock
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.lang.reflect.Method
-import java.lang.reflect.Proxy
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -164,8 +163,8 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
                     continue
                 }
 
-                val listener = Proxy.newProxyInstance(listenerType.classLoader, arrayOf(listenerType)) { _, callback, args ->
-                    val rendered = args?.joinToString(prefix = "[", postfix = "]") { renderArg(it) } ?: "[]"
+                val listener = java.lang.reflect.Proxy.newProxyInstance(listenerType.classLoader, arrayOf(listenerType)) { _: Any, callback: Method, args: Array<out Any?>? ->
+                    val rendered = args?.joinToString(prefix = "[", postfix = "]") { value -> renderArg(value) } ?: "[]"
                     append("[GAMEKEY_CALLBACK] ${callback.name}$rendered")
                     defaultReturn(callback.returnType)
                 }

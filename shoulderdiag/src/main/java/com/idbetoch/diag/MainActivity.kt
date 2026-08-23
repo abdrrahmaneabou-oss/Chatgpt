@@ -28,6 +28,9 @@ import rikka.shizuku.Shizuku
 class MainActivity : AppCompatActivity() {
     private enum class UiState { READY, CONNECTING, SCANNING, DONE }
 
+    private lateinit var shizukuCard: LinearLayout
+    private lateinit var shizukuTitle: TextView
+    private lateinit var shizukuBody: TextView
     private lateinit var statusCard: LinearLayout
     private lateinit var statusTitle: TextView
     private lateinit var statusBody: TextView
@@ -40,30 +43,52 @@ class MainActivity : AppCompatActivity() {
     private val uiHandler = Handler(Looper.getMainLooper())
     @Volatile private var remote: IShoulderDiagService? = null
     private var pendingStart = false
+    private var userRequestedConnect = false
     private var scanStartedAt = 0L
     private var uiState = UiState.READY
 
+    private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
+        refreshShizukuState(fromBinderCallback = true)
+    }
+
+    private val binderDeadListener = Shizuku.OnBinderDeadListener {
+        remote = null
+        showShizukuDisconnected("انقطع اتصال Shizuku. شغّله من تطبيق Shizuku ثم عد إلى هنا.")
+        if (uiState == UiState.SCANNING) {
+            pendingStart = false
+            showReady("انقطع اتصال Shizuku أثناء الفحص. أعد الاتصال ثم ابدأ فحصًا جديدًا.")
+        }
+    }
+
     private val permissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
         if (requestCode != REQ_SHIZUKU) return@OnRequestPermissionResultListener
-        if (grantResult == PackageManager.PERMISSION_GRANTED && pendingStart) {
-            ensureBoundAndStart()
-        } else if (grantResult != PackageManager.PERMISSION_GRANTED) {
+        if (grantResult == PackageManager.PERMISSION_GRANTED) {
+            showShizukuConnecting("تم منح الإذن. جاري ربط خدمة الفحص بـ Shizuku…")
+            bindDiagnosticService()
+        } else {
+            userRequestedConnect = false
             pendingStart = false
-            showReady("إذن Shizuku مطلوب لقراءة مسار زر R بدقة.")
+            showShizukuDisconnected("تم رفض إذن Shizuku. اضغط «اتصل بـ Shizuku» للمحاولة مرة أخرى.")
         }
     }
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             remote = IShoulderDiagService.Stub.asInterface(service)
+            userRequestedConnect = false
+            showShizukuConnected()
             if (pendingStart) beginRemoteScan()
-            else showReady("جاهز. اضغط البطاقة لبدء الفحص.")
+            else if (uiState != UiState.SCANNING && uiState != UiState.DONE) {
+                showReady("Shizuku متصل وجاهز. اضغط «بدء الفحص» عندما تكون مستعدًا.")
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
             remote = null
+            showShizukuDisconnected("انقطع اتصال خدمة الفحص بـ Shizuku. اضغط البطاقة لإعادة الربط.")
             if (uiState == UiState.SCANNING) {
-                showReady("انقطع اتصال Shizuku UserService. أعد المحاولة.")
+                pendingStart = false
+                showReady("انقطع اتصال Shizuku UserService. أعد الاتصال ثم ابدأ الفحص من جديد.")
             }
         }
     }
@@ -74,19 +99,29 @@ class MainActivity : AppCompatActivity() {
         )
             .processNameSuffix("id_be_toch_diag")
             .daemon(true)
-            .tag("id-be-toch-diag-v1")
-            .version(1)
+            .tag("id-be-toch-diag-v2")
+            .version(2)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
+        Shizuku.addBinderDeadListener(binderDeadListener)
         Shizuku.addRequestPermissionResultListener(permissionListener)
         setContentView(buildUi())
         showReady("الفحص يعمل لمدة 30 ثانية. أبقِ الهاتف أفقيًا واستخدم زر R أثناء الفحص.")
+        refreshShizukuState(fromBinderCallback = false)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        refreshShizukuState(fromBinderCallback = false)
     }
 
     override fun onDestroy() {
         uiHandler.removeCallbacksAndMessages(null)
+        Shizuku.removeBinderReceivedListener(binderReceivedListener)
+        Shizuku.removeBinderDeadListener(binderDeadListener)
         Shizuku.removeRequestPermissionResultListener(permissionListener)
         runCatching { Shizuku.unbindUserService(userServiceArgs, connection, false) }
         super.onDestroy()
@@ -146,27 +181,56 @@ class MainActivity : AppCompatActivity() {
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)))
 
         left.addView(TextView(this).apply {
             text = "فاحص زر الكتف R — REDMAGIC / Nubia"
             textSize = 15f
             setTextColor(Color.rgb(190, 195, 210))
             gravity = Gravity.CENTER
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)))
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(38)))
+
+        shizukuCard = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(12), dp(18), dp(12))
+            background = rounded(Color.rgb(40, 45, 61), 18f)
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { connectRequested() }
+        }
+        left.addView(shizukuCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(92)).apply {
+            topMargin = dp(8)
+            bottomMargin = dp(8)
+        })
+
+        shizukuTitle = TextView(this).apply {
+            textSize = 20f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+        }
+        shizukuCard.addView(shizukuTitle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(36)))
+
+        shizukuBody = TextView(this).apply {
+            textSize = 13f
+            setTextColor(Color.rgb(205, 210, 225))
+            gravity = Gravity.CENTER
+        }
+        shizukuCard.addView(shizukuBody, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         statusCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(dp(24), dp(22), dp(24), dp(22))
+            setPadding(dp(24), dp(18), dp(24), dp(18))
             background = rounded(Color.rgb(31, 34, 45), 22f)
             isClickable = true
             isFocusable = true
             setOnClickListener { if (uiState == UiState.READY) startRequested() }
         }
         left.addView(statusCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f).apply {
-            topMargin = dp(14)
-            bottomMargin = dp(14)
+            topMargin = dp(6)
+            bottomMargin = dp(10)
         })
 
         statusTitle = TextView(this).apply {
@@ -175,10 +239,10 @@ class MainActivity : AppCompatActivity() {
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
         }
-        statusCard.addView(statusTitle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)))
+        statusCard.addView(statusTitle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
 
         statusBody = TextView(this).apply {
-            textSize = 16f
+            textSize = 15f
             setTextColor(Color.rgb(205, 210, 225))
             gravity = Gravity.CENTER
         }
@@ -189,21 +253,21 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER
             visibility = View.GONE
         }
-        left.addView(actionsRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(58)))
+        left.addView(actionsRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)))
 
         copyButton = Button(this).apply {
             text = "نسخ النتيجة"
             textSize = 16f
             setOnClickListener { copyResult() }
         }
-        actionsRow.addView(copyButton, LinearLayout.LayoutParams(0, dp(54), 1f).apply { marginEnd = dp(8) })
+        actionsRow.addView(copyButton, LinearLayout.LayoutParams(0, dp(50), 1f).apply { marginEnd = dp(8) })
 
         deleteButton = Button(this).apply {
             text = "حذف النتيجة"
             textSize = 16f
             setOnClickListener { deleteResult() }
         }
-        actionsRow.addView(deleteButton, LinearLayout.LayoutParams(0, dp(54), 1f).apply { marginStart = dp(8) })
+        actionsRow.addView(deleteButton, LinearLayout.LayoutParams(0, dp(50), 1f).apply { marginStart = dp(8) })
 
         val right = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -235,41 +299,89 @@ class MainActivity : AppCompatActivity() {
         return root
     }
 
-    private fun startRequested() {
-        pendingStart = true
-        if (!Shizuku.pingBinder()) {
-            pendingStart = false
-            showReady("Shizuku غير مشغّل. شغّله عبر Wireless debugging/ADB ثم اضغط بدء الفحص.")
-            Toast.makeText(this, "شغّل Shizuku أولًا", Toast.LENGTH_LONG).show()
-            return
-        }
-        if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-            uiState = UiState.CONNECTING
-            setCard("منح الإذن", "وافق على إذن Shizuku، وسيبدأ الفحص تلقائيًا بعدها.")
-            Shizuku.requestPermission(REQ_SHIZUKU)
-            return
-        }
-        ensureBoundAndStart()
+    private fun connectRequested() {
+        userRequestedConnect = true
+        refreshShizukuState(fromBinderCallback = false, forcePermissionPrompt = true)
     }
 
-    private fun ensureBoundAndStart() {
-        if (!Shizuku.pingBinder()) {
-            pendingStart = false
-            showReady("Shizuku غير متصل.")
+    private fun refreshShizukuState(fromBinderCallback: Boolean, forcePermissionPrompt: Boolean = false) {
+        val alive = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
+        if (!alive) {
+            showShizukuDisconnected(
+                if (userRequestedConnect)
+                    "Shizuku لم يرسل Binder بعد. شغّله من تطبيق Shizuku ثم ارجع؛ سيتم اكتشافه تلقائيًا دون إعادة فتح التطبيق."
+                else
+                    "اضغط هنا للاتصال. إذا كان Shizuku متوقفًا شغّله ثم عد إلى التطبيق."
+            )
             return
         }
-        val service = remote
-        if (service != null) {
+
+        val permission = runCatching { Shizuku.checkSelfPermission() }.getOrDefault(PackageManager.PERMISSION_DENIED)
+        if (permission != PackageManager.PERMISSION_GRANTED) {
+            showShizukuConnecting("Shizuku يعمل. اضغط البطاقة لإظهار نافذة الإذن الرسمية من Shizuku.")
+            if (forcePermissionPrompt || userRequestedConnect || fromBinderCallback) {
+                runCatching { Shizuku.requestPermission(REQ_SHIZUKU) }
+                    .onFailure {
+                        showShizukuDisconnected("تعذر طلب إذن Shizuku: ${it.message ?: it.javaClass.simpleName}")
+                    }
+            }
+            return
+        }
+
+        if (remote != null) {
+            userRequestedConnect = false
+            showShizukuConnected()
+            return
+        }
+
+        showShizukuConnecting("Shizuku يعمل والإذن ممنوح. جاري ربط UserService…")
+        bindDiagnosticService()
+    }
+
+    private fun bindDiagnosticService() {
+        if (!runCatching { Shizuku.pingBinder() }.getOrDefault(false)) {
+            showShizukuDisconnected("Shizuku غير متصل حاليًا.")
+            return
+        }
+        if (runCatching { Shizuku.checkSelfPermission() }.getOrDefault(PackageManager.PERMISSION_DENIED) != PackageManager.PERMISSION_GRANTED) {
+            showShizukuConnecting("يلزم إذن Shizuku أولًا. اضغط البطاقة لإظهار نافذة الإذن.")
+            return
+        }
+        runCatching { Shizuku.bindUserService(userServiceArgs, connection) }
+            .onFailure {
+                remote = null
+                showShizukuDisconnected("فشل ربط UserService: ${it.message ?: it.javaClass.simpleName}. اضغط البطاقة لإعادة المحاولة.")
+            }
+    }
+
+    private fun showShizukuConnected() {
+        shizukuTitle.text = "Shizuku متصل ✓"
+        shizukuBody.text = "Binder متاح، الإذن ممنوح، وخدمة الفحص مرتبطة."
+        shizukuCard.background = rounded(Color.rgb(29, 78, 58), 18f)
+    }
+
+    private fun showShizukuConnecting(body: String) {
+        shizukuTitle.text = "الاتصال بـ Shizuku"
+        shizukuBody.text = body
+        shizukuCard.background = rounded(Color.rgb(74, 63, 31), 18f)
+    }
+
+    private fun showShizukuDisconnected(body: String) {
+        shizukuTitle.text = "اتصل بـ Shizuku"
+        shizukuBody.text = body
+        shizukuCard.background = rounded(Color.rgb(68, 39, 45), 18f)
+    }
+
+    private fun startRequested() {
+        pendingStart = true
+        if (remote != null) {
             beginRemoteScan()
             return
         }
         uiState = UiState.CONNECTING
-        setCard("جاري الاتصال…", "يتم الآن تشغيل فاحص Shizuku. سيبدأ الفحص تلقائيًا.")
-        runCatching { Shizuku.bindUserService(userServiceArgs, connection) }
-            .onFailure {
-                pendingStart = false
-                showReady("فشل الاتصال بـ UserService: ${it.message ?: it.javaClass.simpleName}")
-            }
+        setCard("انتظار Shizuku…", "سيبدأ الفحص تلقائيًا فور اكتمال الاتصال بـ Shizuku.")
+        userRequestedConnect = true
+        refreshShizukuState(fromBinderCallback = false, forcePermissionPrompt = true)
     }
 
     private fun beginRemoteScan() {
@@ -335,6 +447,7 @@ class MainActivity : AppCompatActivity() {
         resultView.text = "تم حذف النتيجة. اضغط بدء الفحص لإجراء فحص جديد."
         actionsRow.visibility = View.GONE
         showReady("الفحص يعمل لمدة 30 ثانية. استخدم زر R أثناء الفحص.")
+        refreshShizukuState(fromBinderCallback = false)
     }
 
     private fun showReady(body: String) {

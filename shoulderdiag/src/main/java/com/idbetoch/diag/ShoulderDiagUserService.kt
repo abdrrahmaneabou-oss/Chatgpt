@@ -48,7 +48,7 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
     private fun runScan(seconds: Int) {
         val deadlineMs = SystemClock.elapsedRealtime() + seconds * 1000L
         try {
-            append("=== ID BE TOCH / SHOULDER R DIAGNOSTIC ===")
+            append("=== ID BE TOCH / SHOULDER R + L DIAGNOSTIC ===")
             append("backendUid=${Process.myUid()}")
             append("scanSeconds=$seconds")
             append("timeMs=${System.currentTimeMillis()}")
@@ -66,8 +66,10 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
             append("=== INPUT DEVICES / GETEVENT -PL ===")
             val deviceList = runShell(listOf("/system/bin/getevent", "-pl"), 600_000)
             appendBlock(deviceList)
-            val rNode = discoverRightShoulderNode(deviceList)
+            val rNode = discoverShoulderNode(deviceList, "nubia_tgk_aw_sar1_ch0")
+            val lNode = discoverShoulderNode(deviceList, "nubia_tgk_aw_sar0_ch0")
             append("RIGHT_SHOULDER_NODE=${rNode ?: "NOT_FOUND"}")
+            append("LEFT_SHOULDER_NODE=${lNode ?: "NOT_FOUND"}")
             append("")
 
             if (rNode != null) {
@@ -75,22 +77,33 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
                 appendBlock(runShell(listOf("/system/bin/getevent", "-lp", rNode), 100_000))
                 append("")
             }
+            if (lNode != null) {
+                append("=== L DEVICE CAPABILITIES ===")
+                appendBlock(runShell(listOf("/system/bin/getevent", "-lp", lNode), 100_000))
+                append("")
+            }
 
             append("=== DUMPSYS INPUT MATCHES ===")
             val dumpsys = runShell(listOf("/system/bin/dumpsys", "input"), 1_500_000)
             appendBlock(filterWithContext(dumpsys, listOf(
-                "nubia_tgk_aw_sar1_ch0", rNode ?: "__none__", "KEY_F8", "F8", "gamekey", "tgk"
+                "nubia_tgk_aw_sar1_ch0", "nubia_tgk_aw_sar0_ch0",
+                rNode ?: "__none__", lNode ?: "__none__",
+                "KEY_F8", "KEY_F7", "F8", "F7", "gamekey", "tgk"
             ), 8))
             append("")
 
             val remainingMs = (deadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
-            append("=== LIVE PHYSICAL R EVENTS (${remainingMs}ms remaining) ===")
-            append("Press and release R several times now.")
-            if (rNode == null) {
-                append("Cannot start live getevent: R node was not discovered.")
+            append("=== LIVE PHYSICAL R + L EVENTS (${remainingMs}ms remaining) ===")
+            append("Press and release BOTH R and L several times now.")
+            val nodes = buildList {
+                if (rNode != null) add("R" to rNode)
+                if (lNode != null) add("L" to lNode)
+            }
+            if (nodes.isEmpty()) {
+                append("Cannot start live getevent: no shoulder nodes discovered.")
                 if (remainingMs > 0) Thread.sleep(remainingMs)
             } else if (remainingMs > 0) {
-                captureGetevent(rNode, remainingMs)
+                captureGetevents(nodes, remainingMs)
             } else {
                 append("No live window remained after static diagnostics.")
             }
@@ -164,8 +177,25 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
                 }
 
                 val listener = java.lang.reflect.Proxy.newProxyInstance(listenerType.classLoader, arrayOf(listenerType)) { _: Any, callback: Method, args: Array<out Any?>? ->
-                    val rendered = args?.joinToString(prefix = "[", postfix = "]") { value -> renderArg(value) } ?: "[]"
-                    append("[GAMEKEY_CALLBACK] ${callback.name}$rendered")
+                    val values = args ?: emptyArray()
+                    val rendered = values.joinToString(prefix = "[", postfix = "]") { value -> renderArg(value) }
+                    append("[GAMEKEY_CALLBACK_RAW] ${callback.name}$rendered")
+                    if (callback.name == "onGameKeyActionChanged" && values.size == 7) {
+                        val keyCode = values[0]
+                        val action = values[2]
+                        val actionText = when (action) {
+                            0 -> "DOWN"
+                            1 -> "UP"
+                            else -> action.toString()
+                        }
+                        append(
+                            "[GAMEKEY_CALLBACK_FIELDS] " +
+                                "p1_keyCodeCandidate=$keyCode " +
+                                "p2=${values[1]} " +
+                                "p3_actionCandidate=$actionText " +
+                                "p4=${values[3]} p5=${values[4]} p6=${values[5]} p7=${values[6]}"
+                        )
+                    }
                     defaultReturn(callback.returnType)
                 }
 
@@ -228,35 +258,47 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
         }
     }
 
-    private fun captureGetevent(node: String, durationMs: Long) {
+    private fun captureGetevents(nodes: List<Pair<String, String>>, durationMs: Long) {
+        data class Capture(val label: String, val process: java.lang.Process, val reader: Thread)
+        val captures = mutableListOf<Capture>()
         try {
-            val p = ProcessBuilder("/system/bin/getevent", "-lt", node)
-                .redirectErrorStream(true)
-                .start()
-            val readerThread = Thread({
-                BufferedReader(InputStreamReader(p.inputStream)).use { br ->
-                    var line: String?
-                    while (br.readLine().also { line = it } != null) append("[GETEVENT] ${line.orEmpty()}")
+            nodes.forEach { (label, node) ->
+                try {
+                    val p = ProcessBuilder("/system/bin/getevent", "-lt", node)
+                        .redirectErrorStream(true)
+                        .start()
+                    val readerThread = Thread({
+                        BufferedReader(InputStreamReader(p.inputStream)).use { br ->
+                            var line: String?
+                            while (br.readLine().also { line = it } != null) {
+                                append("[GETEVENT_$label] ${line.orEmpty()}")
+                            }
+                        }
+                    }, "id-be-toch-getevent-$label").apply { start() }
+                    captures += Capture(label, p, readerThread)
+                } catch (t: Throwable) {
+                    append("getevent $label start failed ${t.javaClass.simpleName}: ${t.message ?: ""}")
                 }
-            }, "id-be-toch-getevent-reader").apply { start() }
+            }
 
             Thread.sleep(durationMs)
-            p.destroy()
-            runCatching { p.waitFor() }
-            if (p.isAlive) p.destroyForcibly()
-            readerThread.join(1200)
-            append("GETEVENT_EXIT=${runCatching { p.exitValue() }.getOrDefault(-999)}")
-        } catch (t: Throwable) {
-            append("getevent capture failed ${t.javaClass.simpleName}: ${t.message ?: ""}")
+        } finally {
+            captures.forEach { capture -> runCatching { capture.process.destroy() } }
+            captures.forEach { capture ->
+                runCatching { capture.process.waitFor() }
+                if (capture.process.isAlive) runCatching { capture.process.destroyForcibly() }
+                runCatching { capture.reader.join(1200) }
+                append("GETEVENT_${capture.label}_EXIT=${runCatching { capture.process.exitValue() }.getOrDefault(-999)}")
+            }
         }
     }
 
-    private fun discoverRightShoulderNode(text: String): String? {
+    private fun discoverShoulderNode(text: String, deviceName: String): String? {
         var current: String? = null
         text.lineSequence().forEach { raw ->
             val line = raw.trim()
             Regex("/dev/input/event\\d+").find(line)?.value?.let { current = it }
-            if (line.contains("nubia_tgk_aw_sar1_ch0", true)) return current
+            if (line.contains(deviceName, true)) return current
         }
         return null
     }

@@ -16,7 +16,6 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
     private val running = AtomicBoolean(false)
     private val lock = Any()
     private val out = StringBuilder()
-    @Volatile private var geteventProcess: java.lang.Process? = null
     @Volatile private var registeredListener: Any? = null
     @Volatile private var registeredManager: Any? = null
     @Volatile private var registeredUnregisterMethod: Method? = null
@@ -49,53 +48,59 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
     }
 
     private fun runScan(seconds: Int) {
-        append("=== ID BE TOCH / SHOULDER R DIAGNOSTIC ===")
-        append("backendUid=${Process.myUid()}")
-        append("scanSeconds=$seconds")
-        append("timeMs=${System.currentTimeMillis()}")
-        append("")
-
-        append("=== BUILD ===")
-        appendShell("/system/bin/getprop", "ro.build.fingerprint")
-        appendShell("/system/bin/getprop", "ro.build.type")
-        appendShell("/system/bin/getprop", "ro.debuggable")
-        append("")
-
-        dumpHiddenApiSurface()
-        tryRegisterGameKeyListener()
-
-        append("=== INPUT DEVICES / GETEVENT -PL ===")
-        val deviceList = runShell(listOf("/system/bin/getevent", "-pl"), 600_000)
-        appendBlock(deviceList)
-        val rNode = discoverRightShoulderNode(deviceList)
-        append("RIGHT_SHOULDER_NODE=${rNode ?: "NOT_FOUND"}")
-        append("")
-
-        if (rNode != null) {
-            append("=== R DEVICE CAPABILITIES ===")
-            appendBlock(runShell(listOf("/system/bin/getevent", "-lp", rNode), 100_000))
+        try {
+            append("=== ID BE TOCH / SHOULDER R DIAGNOSTIC ===")
+            append("backendUid=${Process.myUid()}")
+            append("scanSeconds=$seconds")
+            append("timeMs=${System.currentTimeMillis()}")
             append("")
+
+            append("=== BUILD ===")
+            appendShell("/system/bin/getprop", "ro.build.fingerprint")
+            appendShell("/system/bin/getprop", "ro.build.type")
+            appendShell("/system/bin/getprop", "ro.debuggable")
+            append("")
+
+            dumpHiddenApiSurface()
+            tryRegisterGameKeyListener()
+
+            append("=== INPUT DEVICES / GETEVENT -PL ===")
+            val deviceList = runShell(listOf("/system/bin/getevent", "-pl"), 600_000)
+            appendBlock(deviceList)
+            val rNode = discoverRightShoulderNode(deviceList)
+            append("RIGHT_SHOULDER_NODE=${rNode ?: "NOT_FOUND"}")
+            append("")
+
+            if (rNode != null) {
+                append("=== R DEVICE CAPABILITIES ===")
+                appendBlock(runShell(listOf("/system/bin/getevent", "-lp", rNode), 100_000))
+                append("")
+            }
+
+            append("=== DUMPSYS INPUT MATCHES ===")
+            val dumpsys = runShell(listOf("/system/bin/dumpsys", "input"), 1_500_000)
+            appendBlock(filterWithContext(dumpsys, listOf(
+                "nubia_tgk_aw_sar1_ch0", rNode ?: "__none__", "KEY_F8", "F8", "gamekey", "tgk"
+            ), 8))
+            append("")
+
+            append("=== LIVE PHYSICAL R EVENTS ($seconds s) ===")
+            append("Press and release R several times now.")
+            if (rNode == null) {
+                append("Cannot start live getevent: R node was not discovered.")
+                Thread.sleep(seconds * 1000L)
+            } else {
+                captureGetevent(rNode, seconds)
+            }
+
+            unregisterGameKeyListener()
+            append("")
+            append("=== SCAN COMPLETE ===")
+        } catch (t: Throwable) {
+            append("FATAL ${t.javaClass.simpleName}: ${t.message ?: ""}")
+        } finally {
+            running.set(false)
         }
-
-        append("=== DUMPSYS INPUT MATCHES ===")
-        val dumpsys = runShell(listOf("/system/bin/dumpsys", "input"), 1_500_000)
-        appendBlock(filterWithContext(dumpsys, listOf(
-            "nubia_tgk_aw_sar1_ch0", rNode ?: "__none__", "KEY_F8", "F8", "gamekey", "tgk"
-        ), 8))
-        append("")
-
-        append("=== LIVE PHYSICAL R EVENTS ($seconds s) ===")
-        append("Press and release R several times now.")
-        if (rNode == null) {
-            append("Cannot start live getevent: R node was not discovered.")
-        } else {
-            captureGetevent(rNode, seconds)
-        }
-
-        unregisterGameKeyListener()
-        append("")
-        append("=== SCAN COMPLETE ===")
-        running.set(false)
     }
 
     private fun dumpHiddenApiSurface() {
@@ -103,7 +108,7 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
         val names = listOf(
             "android.hardware.input.InputManager",
             "android.hardware.input.IInputGameKeyActionChangedListener",
-            "android.hardware.input.InputManager$InputGameKeyActionChangedListener",
+            "android.hardware.input.InputManager\$InputGameKeyActionChangedListener",
             "com.redmagic.game.touchgamekey.GameOperationKeyInputHelper",
             "com.redmagic.game.touchgamekey.GameOperationKeyInputEventHelper",
             "com.redmagic.game.touchgamekey.IInputGameKeyActionChangedListener"
@@ -211,7 +216,8 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
             m.invoke(manager, *args)
             append("GAMEKEY listener unregistered")
         } catch (t: Throwable) {
-            append("GAMEKEY unregister failed: ${(t.cause ?: t).javaClass.simpleName}: ${(t.cause ?: t).message ?: ""}")
+            val cause = t.cause ?: t
+            append("GAMEKEY unregister failed: ${cause.javaClass.simpleName}: ${cause.message ?: ""}")
         } finally {
             registeredListener = null
             registeredManager = null
@@ -224,7 +230,6 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
             val p = ProcessBuilder("/system/bin/getevent", "-lt", node)
                 .redirectErrorStream(true)
                 .start()
-            geteventProcess = p
             val readerThread = Thread({
                 BufferedReader(InputStreamReader(p.inputStream)).use { br ->
                     var line: String?
@@ -234,14 +239,12 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
 
             Thread.sleep(seconds * 1000L)
             p.destroy()
-            try { p.waitFor() } catch (_: Throwable) {}
+            runCatching { p.waitFor() }
             if (p.isAlive) p.destroyForcibly()
             readerThread.join(1500)
             append("GETEVENT_EXIT=${runCatching { p.exitValue() }.getOrDefault(-999)}")
         } catch (t: Throwable) {
             append("getevent capture failed ${t.javaClass.simpleName}: ${t.message ?: ""}")
-        } finally {
-            geteventProcess = null
         }
     }
 
@@ -315,8 +318,6 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
     }
 
     private fun append(line: String) {
-        synchronized(lock) {
-            out.append(line).append('\n')
-        }
+        synchronized(lock) { out.append(line).append('\n') }
     }
 }

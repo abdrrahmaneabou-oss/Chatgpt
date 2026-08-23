@@ -131,11 +131,17 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.rgb(12, 13, 17))
         }
 
+        val leftScroll = ScrollView(this).apply {
+            isFillViewport = true
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+        }
+        root.addView(leftScroll, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.43f))
+
         val left = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(6), dp(4), dp(10), dp(4))
+            setPadding(dp(6), dp(4), dp(10), dp(12))
         }
-        root.addView(left, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.43f))
+        leftScroll.addView(left, ScrollView.LayoutParams(ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT))
 
         left.addView(TextView(this).apply {
             text = "NUBIA INPUT LAB"
@@ -208,18 +214,31 @@ class MainActivity : AppCompatActivity() {
         preset("L LIVE", "getevent -lt /dev/input/event3", 8)
         preset("INPUT", "dumpsys input | grep -i -E 'tgk|gamekey|nubia_tgk'", 0)
 
+        left.addView(TextView(this).apply {
+            text = "COMMAND — الصق أمر Shizuku هنا"
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            setPadding(dp(4), dp(8), dp(4), dp(4))
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(34)))
+
         commandEditor = EditText(this).apply {
             setText("getevent -lt /dev/input/event6")
             textSize = 12f
             typeface = Typeface.MONOSPACE
             setTextColor(Color.WHITE)
             setHintTextColor(Color.GRAY)
-            hint = "اكتب أمر shell هنا — يدعم عدة أسطر و pipes"
-            gravity = Gravity.TOP
+            hint = "اكتب أو الصق أمر shell هنا — يدعم عدة أسطر و pipes"
+            gravity = Gravity.TOP or Gravity.START
+            minLines = 5
+            maxLines = 10
+            isSingleLine = false
+            setHorizontallyScrolling(false)
             setPadding(dp(10), dp(8), dp(10), dp(8))
             background = rounded(Color.rgb(25, 27, 35), 12)
         }
-        left.addView(commandEditor, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = dp(5) })
+        left.addView(commandEditor, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(150)).apply { topMargin = dp(3) })
 
         val timing = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         left.addView(timing, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)).apply { topMargin = dp(5) })

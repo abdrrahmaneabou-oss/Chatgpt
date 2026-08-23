@@ -13,11 +13,12 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.text.InputType
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.widget.Button
-import android.widget.FrameLayout
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -26,148 +27,99 @@ import androidx.appcompat.app.AppCompatActivity
 import rikka.shizuku.Shizuku
 
 class MainActivity : AppCompatActivity() {
-    private enum class UiState { READY, CONNECTING, SCANNING, DONE }
-
     private lateinit var shizukuCard: LinearLayout
     private lateinit var shizukuTitle: TextView
     private lateinit var shizukuBody: TextView
-    private lateinit var statusCard: LinearLayout
-    private lateinit var statusTitle: TextView
-    private lateinit var statusBody: TextView
+    private lateinit var sessionTitle: TextView
+    private lateinit var sessionBody: TextView
+    private lateinit var commandEditor: EditText
+    private lateinit var prepareEditor: EditText
+    private lateinit var captureEditor: EditText
     private lateinit var resultView: TextView
     private lateinit var resultScroll: ScrollView
-    private lateinit var actionsRow: LinearLayout
-    private lateinit var copyButton: Button
-    private lateinit var deleteButton: Button
 
-    private val uiHandler = Handler(Looper.getMainLooper())
+    private val ui = Handler(Looper.getMainLooper())
     @Volatile private var remote: IShoulderDiagService? = null
-    private var pendingStart = false
-    private var userRequestedConnect = false
-    private var scanStartedAt = 0L
-    private var uiState = UiState.READY
+    private var requestedConnect = false
 
-    private fun uiReady(): Boolean = ::shizukuCard.isInitialized && ::statusCard.isInitialized
+    private fun uiReady() = ::shizukuCard.isInitialized
 
-    private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
-        if (!uiReady()) return@OnBinderReceivedListener
-        refreshShizukuState(fromBinderCallback = true)
+    private val binderReceived = Shizuku.OnBinderReceivedListener {
+        if (uiReady()) refreshShizuku(true)
     }
 
-    private val binderDeadListener = Shizuku.OnBinderDeadListener {
+    private val binderDead = Shizuku.OnBinderDeadListener {
         remote = null
-        if (!uiReady()) return@OnBinderDeadListener
-        showShizukuDisconnected("انقطع اتصال Shizuku. شغّله من تطبيق Shizuku ثم عد إلى هنا.")
-        if (uiState == UiState.SCANNING) {
-            pendingStart = false
-            showReady("انقطع اتصال Shizuku أثناء الفحص. أعد الاتصال ثم ابدأ فحصًا جديدًا.")
-        }
+        if (uiReady()) showShizuku(false, "انقطع Binder من Shizuku")
     }
 
-    private val permissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
-        if (requestCode != REQ_SHIZUKU || !uiReady()) return@OnRequestPermissionResultListener
-        if (grantResult == PackageManager.PERMISSION_GRANTED) {
-            showShizukuConnecting("تم منح الإذن. جاري ربط خدمة الفحص بـ Shizuku…")
-            bindDiagnosticService()
-        } else {
-            userRequestedConnect = false
-            pendingStart = false
-            showShizukuDisconnected("تم رفض إذن Shizuku. اضغط «اتصل بـ Shizuku» للمحاولة مرة أخرى.")
-        }
+    private val permissionResult = Shizuku.OnRequestPermissionResultListener { code, result ->
+        if (code != REQ_SHIZUKU || !uiReady()) return@OnRequestPermissionResultListener
+        if (result == PackageManager.PERMISSION_GRANTED) bindService() else showShizuku(false, "تم رفض إذن Shizuku")
     }
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             remote = IShoulderDiagService.Stub.asInterface(service)
-            if (!uiReady()) return
-            userRequestedConnect = false
-            showShizukuConnected()
-            if (pendingStart) beginRemoteScan()
-            else if (uiState != UiState.SCANNING && uiState != UiState.DONE) {
-                showReady("Shizuku متصل وجاهز. اضغط «بدء الفحص» عندما تكون مستعدًا.")
-            }
+            requestedConnect = false
+            showShizuku(true, "UID=${runCatching { remote?.backendUid }.getOrNull() ?: "?"} — UserService جاهز")
+            poll()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
             remote = null
-            if (!uiReady()) return
-            showShizukuDisconnected("انقطع اتصال خدمة الفحص بـ Shizuku. اضغط البطاقة لإعادة الربط.")
-            if (uiState == UiState.SCANNING) {
-                pendingStart = false
-                showReady("انقطع اتصال Shizuku UserService. أعد الاتصال ثم ابدأ الفحص من جديد.")
-            }
+            showShizuku(false, "UserService انفصل — اضغط للاتصال من جديد")
         }
     }
 
-    private val userServiceArgs by lazy {
-        Shizuku.UserServiceArgs(
-            ComponentName(packageName, ShoulderDiagUserService::class.java.name)
-        )
-            .processNameSuffix("id_be_toch_diag")
+    private val serviceArgs by lazy {
+        Shizuku.UserServiceArgs(ComponentName(packageName, ShoulderDiagUserService::class.java.name))
+            .processNameSuffix("id_be_toch_lab")
             .daemon(true)
-            .tag("id-be-toch-diag-v2")
-            .version(2)
+            .tag("id-be-toch-nubia-input-lab-v3")
+            .version(3)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        // Build the UI first. addBinderReceivedListenerSticky may invoke immediately
-        // when Shizuku is already running, so registering it before these lateinit
-        // views exist causes an instant startup crash.
         setContentView(buildUi())
-        showReady("الفحص يعمل لمدة 30 ثانية. أبقِ الهاتف أفقيًا واستخدم زر R أثناء الفحص.")
 
-        Shizuku.addBinderDeadListener(binderDeadListener)
-        Shizuku.addRequestPermissionResultListener(permissionListener)
-        Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
+        Shizuku.addBinderDeadListener(binderDead)
+        Shizuku.addRequestPermissionResultListener(permissionResult)
+        Shizuku.addBinderReceivedListenerSticky(binderReceived)
 
-        refreshShizukuState(fromBinderCallback = false)
+        refreshShizuku(false)
+        poll()
     }
 
     override fun onResume() {
         super.onResume()
-        if (uiReady()) refreshShizukuState(fromBinderCallback = false)
+        if (uiReady()) refreshShizuku(false)
     }
 
     override fun onDestroy() {
-        uiHandler.removeCallbacksAndMessages(null)
-        Shizuku.removeBinderReceivedListener(binderReceivedListener)
-        Shizuku.removeBinderDeadListener(binderDeadListener)
-        Shizuku.removeRequestPermissionResultListener(permissionListener)
-        runCatching { Shizuku.unbindUserService(userServiceArgs, connection, false) }
+        ui.removeCallbacksAndMessages(null)
+        Shizuku.removeBinderReceivedListener(binderReceived)
+        Shizuku.removeBinderDeadListener(binderDead)
+        Shizuku.removeRequestPermissionResultListener(permissionResult)
         super.onDestroy()
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (uiState == UiState.SCANNING) {
-            val device = event.device
-            val actionName = when (event.action) {
+        val service = remote
+        if (service != null && runCatching { service.isBusy }.getOrDefault(false)) {
+            val action = when (event.action) {
                 KeyEvent.ACTION_DOWN -> "DOWN"
                 KeyEvent.ACTION_UP -> "UP"
                 else -> event.action.toString()
             }
+            val d = event.device
             val line = buildString {
-                append("action=$actionName")
-                append(" keyCode=${event.keyCode}")
-                append(" keyName=${KeyEvent.keyCodeToString(event.keyCode)}")
-                append(" scanCode=${event.scanCode}")
-                append(" deviceId=${event.deviceId}")
-                append(" source=0x${event.source.toString(16)}")
-                append(" flags=0x${event.flags.toString(16)}")
-                append(" repeat=${event.repeatCount}")
-                append(" meta=0x${event.metaState.toString(16)}")
-                append(" downTime=${event.downTime}")
-                append(" eventTime=${event.eventTime}")
-                if (device != null) {
-                    append(" deviceName=${device.name}")
-                    append(" descriptor=${device.descriptor}")
-                    append(" vendorId=${device.vendorId}")
-                    append(" productId=${device.productId}")
-                    append(" deviceSources=0x${device.sources.toString(16)}")
-                }
+                append("$action keyCode=${event.keyCode} scanCode=${event.scanCode} deviceId=${event.deviceId}")
+                append(" source=0x${event.source.toString(16)} flags=0x${event.flags.toString(16)}")
+                if (d != null) append(" device=${d.name}")
             }
-            runCatching { remote?.appendAppKeyEvent(line) }
+            runCatching { service.appendAppKeyEvent(line) }
         }
         return super.dispatchKeyEvent(event)
     }
@@ -175,315 +127,260 @@ class MainActivity : AppCompatActivity() {
     private fun buildUi(): View {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(dp(18), dp(18), dp(18), dp(18))
-            setBackgroundColor(Color.rgb(14, 15, 20))
+            setPadding(dp(14), dp(14), dp(14), dp(14))
+            setBackgroundColor(Color.rgb(12, 13, 17))
         }
 
         val left = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(dp(8), dp(8), dp(14), dp(8))
+            setPadding(dp(6), dp(4), dp(10), dp(4))
         }
-        root.addView(left, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.42f))
+        root.addView(left, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.43f))
 
         left.addView(TextView(this).apply {
-            text = "ID BE TOCH"
-            textSize = 26f
+            text = "NUBIA INPUT LAB"
+            textSize = 24f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)))
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)))
 
         left.addView(TextView(this).apply {
-            text = "فاحص زر الكتف R — REDMAGIC / Nubia"
-            textSize = 15f
-            setTextColor(Color.rgb(190, 195, 210))
+            text = "هدف الأداة: الوصول إلى R/L الفيزيائي وبناء النصف الأيسر لـ PixelTrigger"
+            textSize = 12f
+            setTextColor(Color.rgb(185, 190, 205))
             gravity = Gravity.CENTER
         }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(38)))
 
         shizukuCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
-            setPadding(dp(18), dp(12), dp(18), dp(12))
-            background = rounded(Color.rgb(40, 45, 61), 18f)
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            background = rounded(Color.rgb(67, 39, 45), 16)
             isClickable = true
-            isFocusable = true
-            setOnClickListener { connectRequested() }
+            setOnClickListener { requestedConnect = true; refreshShizuku(false, true) }
         }
-        left.addView(shizukuCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(92)).apply {
-            topMargin = dp(8)
-            bottomMargin = dp(8)
-        })
+        left.addView(shizukuCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(76)).apply { topMargin = dp(6) })
 
         shizukuTitle = TextView(this).apply {
-            textSize = 20f
+            text = "اتصل بـ Shizuku"
+            textSize = 18f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
         }
-        shizukuCard.addView(shizukuTitle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(36)))
+        shizukuCard.addView(shizukuTitle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(30)))
 
         shizukuBody = TextView(this).apply {
-            textSize = 13f
-            setTextColor(Color.rgb(205, 210, 225))
+            textSize = 12f
+            setTextColor(Color.rgb(215, 218, 228))
             gravity = Gravity.CENTER
         }
         shizukuCard.addView(shizukuBody, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        statusCard = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(dp(24), dp(18), dp(24), dp(18))
-            background = rounded(Color.rgb(31, 34, 45), 22f)
-            isClickable = true
-            isFocusable = true
-            setOnClickListener { if (uiState == UiState.READY) startRequested() }
-        }
-        left.addView(statusCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f).apply {
-            topMargin = dp(6)
-            bottomMargin = dp(10)
-        })
-
-        statusTitle = TextView(this).apply {
-            textSize = 24f
-            typeface = Typeface.DEFAULT_BOLD
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-        }
-        statusCard.addView(statusTitle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(52)))
-
-        statusBody = TextView(this).apply {
+        val firstCapture = Button(this).apply {
+            text = "الفحص الأول الحاسم — R + L"
             textSize = 15f
-            setTextColor(Color.rgb(205, 210, 225))
+            setOnClickListener { startFirstCapture() }
+        }
+        left.addView(firstCapture, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(50)).apply { topMargin = dp(8) })
+
+        left.addView(TextView(this).apply {
+            text = "يعطيك 3 ثوانٍ للاستعداد، ثم يلتقط R وL وNubia GameKey لمدة 15 ثانية فقط دون dumpsys ضخم."
+            textSize = 11f
+            setTextColor(Color.rgb(180, 186, 202))
             gravity = Gravity.CENTER
-        }
-        statusCard.addView(statusBody, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(42)))
 
-        actionsRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            visibility = View.GONE
+        val presets = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        left.addView(presets, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)).apply { topMargin = dp(4) })
+        fun preset(label: String, command: String, capture: Int) {
+            presets.addView(Button(this).apply {
+                text = label
+                textSize = 11f
+                setOnClickListener {
+                    commandEditor.setText(command)
+                    captureEditor.setText(capture.toString())
+                }
+            }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
         }
-        left.addView(actionsRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)))
+        preset("R LIVE", "getevent -lt /dev/input/event6", 8)
+        preset("L LIVE", "getevent -lt /dev/input/event3", 8)
+        preset("INPUT", "dumpsys input | grep -i -E 'tgk|gamekey|nubia_tgk'", 0)
 
-        copyButton = Button(this).apply {
-            text = "نسخ النتيجة"
-            textSize = 16f
-            setOnClickListener { copyResult() }
+        commandEditor = EditText(this).apply {
+            setText("getevent -lt /dev/input/event6")
+            textSize = 12f
+            typeface = Typeface.MONOSPACE
+            setTextColor(Color.WHITE)
+            setHintTextColor(Color.GRAY)
+            hint = "اكتب أمر shell هنا — يدعم عدة أسطر و pipes"
+            gravity = Gravity.TOP
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            background = rounded(Color.rgb(25, 27, 35), 12)
         }
-        actionsRow.addView(copyButton, LinearLayout.LayoutParams(0, dp(50), 1f).apply { marginEnd = dp(8) })
+        left.addView(commandEditor, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f).apply { topMargin = dp(5) })
 
-        deleteButton = Button(this).apply {
-            text = "حذف النتيجة"
-            textSize = 16f
-            setOnClickListener { deleteResult() }
-        }
-        actionsRow.addView(deleteButton, LinearLayout.LayoutParams(0, dp(50), 1f).apply { marginStart = dp(8) })
+        val timing = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        left.addView(timing, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)).apply { topMargin = dp(5) })
+        timing.addView(TextView(this).apply { text = "استعداد"; setTextColor(Color.WHITE); gravity = Gravity.CENTER }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.7f))
+        prepareEditor = numberBox("3")
+        timing.addView(prepareEditor, LinearLayout.LayoutParams(0, dp(42), 0.55f))
+        timing.addView(TextView(this).apply { text = "ث  |  التقاط"; setTextColor(Color.WHITE); gravity = Gravity.CENTER }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+        captureEditor = numberBox("8")
+        timing.addView(captureEditor, LinearLayout.LayoutParams(0, dp(42), 0.55f))
+        timing.addView(TextView(this).apply { text = "ث"; setTextColor(Color.WHITE); gravity = Gravity.CENTER }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.35f))
+
+        val runRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        left.addView(runRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(48)))
+        runRow.addView(Button(this).apply { text = "RUN"; setOnClickListener { runCommand() } }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+        runRow.addView(Button(this).apply { text = "STOP"; setOnClickListener { runCatching { remote?.stopActiveSession() } } }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
 
         val right = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(8), dp(8), dp(8))
+            setPadding(dp(10), dp(4), dp(6), dp(4))
         }
-        root.addView(right, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.58f))
+        root.addView(right, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 0.57f))
 
-        right.addView(TextView(this).apply {
-            text = "النتيجة التقنية"
-            textSize = 19f
+        sessionTitle = TextView(this).apply {
+            text = "IDLE"
+            textSize = 18f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
-        }, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)))
+        }
+        right.addView(sessionTitle, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(30)))
+
+        sessionBody = TextView(this).apply {
+            text = "النتيجة محدودة تلقائيًا لمنع انهيار UserService."
+            textSize = 11f
+            setTextColor(Color.rgb(180, 187, 205))
+        }
+        right.addView(sessionBody, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(30)))
+
+        val actionRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        right.addView(actionRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(44)))
+        actionRow.addView(Button(this).apply { text = "نسخ"; setOnClickListener { copyResult() } }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
+        actionRow.addView(Button(this).apply { text = "مسح"; setOnClickListener { runCatching { remote?.clearResult() }; resultView.text = "" } }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
 
         resultView = TextView(this).apply {
             textSize = 11f
             typeface = Typeface.MONOSPACE
-            setTextColor(Color.rgb(216, 220, 230))
+            setTextColor(Color.rgb(220, 223, 232))
             setTextIsSelectable(true)
-            setPadding(dp(14), dp(14), dp(14), dp(14))
-            text = "لم يبدأ الفحص بعد."
+            setPadding(dp(10), dp(10), dp(10), dp(10))
+            text = "اتصل بـ Shizuku ثم شغّل «الفحص الأول الحاسم»."
         }
         resultScroll = ScrollView(this).apply {
-            background = rounded(Color.rgb(22, 24, 31), 16f)
-            addView(resultView, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT))
+            background = rounded(Color.rgb(20, 22, 28), 12)
+            addView(resultView)
         }
         right.addView(resultScroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         return root
     }
 
-    private fun connectRequested() {
-        userRequestedConnect = true
-        refreshShizukuState(fromBinderCallback = false, forcePermissionPrompt = true)
+    private fun numberBox(initial: String) = EditText(this).apply {
+        setText(initial)
+        inputType = InputType.TYPE_CLASS_NUMBER
+        gravity = Gravity.CENTER
+        setTextColor(Color.WHITE)
+        background = rounded(Color.rgb(30, 33, 42), 10)
     }
 
-    private fun refreshShizukuState(fromBinderCallback: Boolean, forcePermissionPrompt: Boolean = false) {
+    private fun startFirstCapture() {
+        val s = requireService() ?: return
+        if (runCatching { s.isBusy }.getOrDefault(false)) {
+            Toast.makeText(this, "هناك جلسة تعمل بالفعل", Toast.LENGTH_SHORT).show()
+            return
+        }
+        runCatching { s.startFirstCapture(3, 15) }
+            .onFailure { Toast.makeText(this, "تعذر بدء الفحص: ${it.message}", Toast.LENGTH_LONG).show() }
+    }
+
+    private fun runCommand() {
+        val s = requireService() ?: return
+        val command = commandEditor.text.toString().trim()
+        if (command.isBlank()) return
+        val prep = prepareEditor.text.toString().toIntOrNull()?.coerceIn(0, 15) ?: 0
+        val capture = captureEditor.text.toString().toIntOrNull()?.coerceIn(0, 120) ?: 0
+        runCatching { s.runScript(command, prep, capture) }
+            .onFailure { Toast.makeText(this, "تعذر تشغيل الأمر: ${it.message}", Toast.LENGTH_LONG).show() }
+    }
+
+    private fun requireService(): IShoulderDiagService? {
+        val s = remote
+        if (s != null) return s
+        requestedConnect = true
+        refreshShizuku(false, true)
+        Toast.makeText(this, "اربط Shizuku أولًا", Toast.LENGTH_SHORT).show()
+        return null
+    }
+
+    private fun poll() {
+        val s = remote
+        if (s != null) {
+            runCatching {
+                sessionTitle.text = s.sessionState
+                val text = s.result
+                if (text != resultView.text.toString()) {
+                    resultView.text = text
+                    resultScroll.post { resultScroll.fullScroll(View.FOCUS_DOWN) }
+                }
+                sessionBody.text = if (s.isBusy) "جلسة نشطة — يمكنك الضغط على R/L الآن أو STOP" else "جاهز — سجل دائري بحد أقصى 2000 سطر"
+            }
+        }
+        ui.postDelayed({ poll() }, 300)
+    }
+
+    private fun refreshShizuku(fromBinder: Boolean, forcePrompt: Boolean = false) {
         if (!uiReady()) return
         val alive = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
         if (!alive) {
-            showShizukuDisconnected(
-                if (userRequestedConnect)
-                    "Shizuku لم يرسل Binder بعد. شغّله من تطبيق Shizuku ثم ارجع؛ سيتم اكتشافه تلقائيًا دون إعادة فتح التطبيق."
-                else
-                    "اضغط هنا للاتصال. إذا كان Shizuku متوقفًا شغّله ثم عد إلى التطبيق."
-            )
+            showShizuku(false, if (requestedConnect) "Shizuku يعمل في التطبيق الآخر؟ ارجع بعد تشغيله وسيُكتشف تلقائيًا." else "اضغط للاتصال")
             return
         }
 
         val permission = runCatching { Shizuku.checkSelfPermission() }.getOrDefault(PackageManager.PERMISSION_DENIED)
         if (permission != PackageManager.PERMISSION_GRANTED) {
-            showShizukuConnecting("Shizuku يعمل. اضغط البطاقة لإظهار نافذة الإذن الرسمية من Shizuku.")
-            if (forcePermissionPrompt || userRequestedConnect || fromBinderCallback) {
-                runCatching { Shizuku.requestPermission(REQ_SHIZUKU) }
-                    .onFailure {
-                        showShizukuDisconnected("تعذر طلب إذن Shizuku: ${it.message ?: it.javaClass.simpleName}")
-                    }
-            }
+            showShizuku(false, "Binder موجود — اضغط لمنح الإذن")
+            if (forcePrompt || requestedConnect || fromBinder) runCatching { Shizuku.requestPermission(REQ_SHIZUKU) }
             return
         }
 
         if (remote != null) {
-            userRequestedConnect = false
-            showShizukuConnected()
+            showShizuku(true, "Shizuku + UserService متصلان")
             return
         }
-
-        showShizukuConnecting("Shizuku يعمل والإذن ممنوح. جاري ربط UserService…")
-        bindDiagnosticService()
+        showShizuku(false, "الإذن ممنوح — جاري ربط UserService…")
+        bindService()
     }
 
-    private fun bindDiagnosticService() {
-        if (!runCatching { Shizuku.pingBinder() }.getOrDefault(false)) {
-            showShizukuDisconnected("Shizuku غير متصل حاليًا.")
-            return
-        }
-        if (runCatching { Shizuku.checkSelfPermission() }.getOrDefault(PackageManager.PERMISSION_DENIED) != PackageManager.PERMISSION_GRANTED) {
-            showShizukuConnecting("يلزم إذن Shizuku أولًا. اضغط البطاقة لإظهار نافذة الإذن.")
-            return
-        }
-        runCatching { Shizuku.bindUserService(userServiceArgs, connection) }
-            .onFailure {
-                remote = null
-                showShizukuDisconnected("فشل ربط UserService: ${it.message ?: it.javaClass.simpleName}. اضغط البطاقة لإعادة المحاولة.")
-            }
+    private fun bindService() {
+        runCatching { Shizuku.bindUserService(serviceArgs, connection) }
+            .onFailure { showShizuku(false, "فشل bind: ${it.message ?: it.javaClass.simpleName}") }
     }
 
-    private fun showShizukuConnected() {
-        shizukuTitle.text = "Shizuku متصل ✓"
-        shizukuBody.text = "Binder متاح، الإذن ممنوح، وخدمة الفحص مرتبطة."
-        shizukuCard.background = rounded(Color.rgb(29, 78, 58), 18f)
-    }
-
-    private fun showShizukuConnecting(body: String) {
-        shizukuTitle.text = "الاتصال بـ Shizuku"
+    private fun showShizuku(connected: Boolean, body: String) {
+        shizukuTitle.text = if (connected) "Shizuku متصل ✓" else "اتصل بـ Shizuku"
         shizukuBody.text = body
-        shizukuCard.background = rounded(Color.rgb(74, 63, 31), 18f)
-    }
-
-    private fun showShizukuDisconnected(body: String) {
-        shizukuTitle.text = "اتصل بـ Shizuku"
-        shizukuBody.text = body
-        shizukuCard.background = rounded(Color.rgb(68, 39, 45), 18f)
-    }
-
-    private fun startRequested() {
-        pendingStart = true
-        if (remote != null) {
-            beginRemoteScan()
-            return
-        }
-        uiState = UiState.CONNECTING
-        setCard("انتظار Shizuku…", "سيبدأ الفحص تلقائيًا فور اكتمال الاتصال بـ Shizuku.")
-        userRequestedConnect = true
-        refreshShizukuState(fromBinderCallback = false, forcePermissionPrompt = true)
-    }
-
-    private fun beginRemoteScan() {
-        val service = remote ?: return
-        pendingStart = false
-        val uid = runCatching { service.backendUid }.getOrDefault(-1)
-        runCatching { service.startScan(SCAN_SECONDS) }
-            .onFailure {
-                showReady("تعذر بدء الفحص: ${it.message ?: it.javaClass.simpleName}")
-                return
-            }
-        uiState = UiState.SCANNING
-        scanStartedAt = System.currentTimeMillis()
-        actionsRow.visibility = View.GONE
-        resultView.text = "بدأ الفحص…\nbackendUid=$uid\n\nاستخدم زر R الآن."
-        tickScanUi()
-    }
-
-    private fun tickScanUi() {
-        if (uiState != UiState.SCANNING) return
-        val elapsed = ((System.currentTimeMillis() - scanStartedAt) / 1000L).toInt()
-        val remaining = (SCAN_SECONDS - elapsed).coerceAtLeast(0)
-        setCard(
-            "الفحص جارٍ — $remaining ثانية",
-            "استخدم زر R الآن. اضغط R واتركه عدة مرات خلال مدة الفحص.\nلا تغلق التطبيق وحافظ على الوضع الأفقي."
-        )
-
-        val service = remote
-        if (service != null) {
-            runCatching { service.result }.getOrNull()?.let { text ->
-                if (text.isNotBlank()) {
-                    resultView.text = text
-                    resultScroll.post { resultScroll.fullScroll(View.FOCUS_DOWN) }
-                }
-            }
-            val stillRunning = runCatching { service.isRunning }.getOrDefault(true)
-            if (!stillRunning && elapsed >= 1) {
-                finishScan()
-                return
-            }
-        }
-        uiHandler.postDelayed({ tickScanUi() }, 500)
-    }
-
-    private fun finishScan() {
-        uiState = UiState.DONE
-        val text = runCatching { remote?.result.orEmpty() }.getOrDefault(resultView.text.toString())
-        resultView.text = text.ifBlank { "اكتمل الفحص لكن لم تصل نتيجة من UserService." }
-        setCard("اكتمل الفحص", "النتيجة جاهزة. استخدم زر «نسخ النتيجة» لإرسالها، أو احذفها لبدء فحص جديد.")
-        statusCard.isClickable = false
-        actionsRow.visibility = View.VISIBLE
+        shizukuCard.background = rounded(if (connected) Color.rgb(28, 78, 57) else Color.rgb(67, 39, 45), 16)
     }
 
     private fun copyResult() {
-        val text = resultView.text.toString()
-        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("ID BE TOCH result", text))
+        val clip = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clip.setPrimaryClip(ClipData.newPlainText("Nubia Input Lab result", resultView.text.toString()))
         Toast.makeText(this, "تم نسخ النتيجة", Toast.LENGTH_SHORT).show()
     }
 
-    private fun deleteResult() {
-        runCatching { remote?.clearResult() }
-        resultView.text = "تم حذف النتيجة. اضغط بدء الفحص لإجراء فحص جديد."
-        actionsRow.visibility = View.GONE
-        showReady("الفحص يعمل لمدة 30 ثانية. استخدم زر R أثناء الفحص.")
-        refreshShizukuState(fromBinderCallback = false)
-    }
-
-    private fun showReady(body: String) {
-        uiState = UiState.READY
-        statusCard.isClickable = true
-        setCard("بدء الفحص", body)
-    }
-
-    private fun setCard(title: String, body: String) {
-        statusTitle.text = title
-        statusBody.text = body
-    }
-
-    private fun rounded(color: Int, radiusDp: Float): GradientDrawable = GradientDrawable().apply {
+    private fun rounded(color: Int, radiusDp: Int) = GradientDrawable().apply {
         shape = GradientDrawable.RECTANGLE
         setColor(color)
-        cornerRadius = dp(radiusDp.toInt()).toFloat()
+        cornerRadius = dp(radiusDp).toFloat()
     }
 
-    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     companion object {
         private const val REQ_SHIZUKU = 9104
-        private const val SCAN_SECONDS = 30
     }
 }

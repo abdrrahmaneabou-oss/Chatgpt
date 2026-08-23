@@ -286,9 +286,8 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
         track(p)
         val reader = Thread({
             BufferedReader(InputStreamReader(p.inputStream)).use { br ->
-                var line: String?
-                while (!stopRequested.get() && br.readLine().also { line = it } != null) {
-                    val s = line.orEmpty()
+                while (!stopRequested.get()) {
+                    val s = br.readLine() ?: break
                     if (s.contains("EV_KEY") || s.contains("ABS_DISTANCE")) append("$label $s")
                 }
             }
@@ -308,8 +307,10 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
 
     private fun startReader(process: java.lang.Process, prefix: String): Thread = Thread({
         BufferedReader(InputStreamReader(process.inputStream)).use { br ->
-            var line: String?
-            while (!stopRequested.get() && br.readLine().also { line = it } != null) append("$prefix ${line.orEmpty()}")
+            while (!stopRequested.get()) {
+                val s = br.readLine() ?: break
+                append("$prefix $s")
+            }
         }
     }, "id-be-toch-output").apply { start() }
 

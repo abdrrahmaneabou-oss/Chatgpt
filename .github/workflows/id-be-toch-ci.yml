@@ -8,46 +8,88 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: id-be-toch-diagnostic
+  cancel-in-progress: true
+
 jobs:
   build:
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ID-BE-TOCH
+          fetch-depth: 0
+
+      - name: Capture source
+        shell: bash
+        run: echo "SOURCE_SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Gradle
+      - name: Setup Gradle 8.7
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
 
       - name: Build diagnostic APK
-        run: ./gradlew :shoulderdiag:assembleDebug --stacktrace
+        id: gradle_build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle --no-daemon --rerun-tasks :shoulderdiag:assembleDebug --stacktrace 2>&1 | tee /tmp/id-be-toch-gradle.log
+
+      - name: Publish failure log
+        if: steps.gradle_build.outcome != 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p docs
+          {
+            echo '# ID BE TOCH CI failure'
+            echo "Source commit: $SOURCE_SHA"
+            echo
+            tail -n 700 /tmp/id-be-toch-gradle.log
+          } > docs/ID_BE_TOCH_FAILURE.log
+          git config user.name 'ID BE TOCH CI'
+          git config user.email 'actions@users.noreply.github.com'
+          git add docs/ID_BE_TOCH_FAILURE.log
+          git commit -m "ci: record ID BE TOCH failure for $SOURCE_SHA [skip ci]" || true
+          git pull --rebase origin ID-BE-TOCH || true
+          git push origin HEAD:ID-BE-TOCH
+          exit 1
 
       - name: Publish APK into dist
+        if: steps.gradle_build.outcome == 'success'
+        shell: bash
         run: |
-          mkdir -p dist
-          cp shoulderdiag/build/outputs/apk/debug/shoulderdiag-debug.apk dist/ID-BE-TOCH-debug.apk
-          sha256sum dist/ID-BE-TOCH-debug.apk | tee dist/ID-BE-TOCH-debug.apk.sha256
+          set -euo pipefail
+          APK=shoulderdiag/build/outputs/apk/debug/shoulderdiag-debug.apk
+          OUT=dist/ID-BE-TOCH-debug.apk
+          test -s "$APK"
+          mkdir -p dist docs
+          cp "$APK" "$OUT"
+          sha256sum "$OUT" | tee "$OUT.sha256"
+          rm -f docs/ID_BE_TOCH_FAILURE.log
+          git config user.name 'ID BE TOCH CI'
+          git config user.email 'actions@users.noreply.github.com'
+          git add "$OUT" "$OUT.sha256"
+          git add -u docs/ID_BE_TOCH_FAILURE.log || true
+          git commit -m "build: publish ID BE TOCH diagnostic APK from $SOURCE_SHA [skip ci]" || true
+          git pull --rebase origin ID-BE-TOCH || true
+          git push origin HEAD:ID-BE-TOCH
 
       - name: Upload workflow artifact
+        if: steps.gradle_build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: ID-BE-TOCH-debug
           path: |
             dist/ID-BE-TOCH-debug.apk
             dist/ID-BE-TOCH-debug.apk.sha256
-
-      - name: Commit APK to branch
-        run: |
-          git config user.name "ID BE TOCH CI"
-          git config user.email "actions@users.noreply.github.com"
-          git add dist/ID-BE-TOCH-debug.apk dist/ID-BE-TOCH-debug.apk.sha256
-          if git diff --cached --quiet; then
-            echo "No APK changes"
-          else
-            git commit -m "build: publish ID BE TOCH diagnostic APK [skip ci]"
-            git push
-          fi
+          if-no-files-found: error

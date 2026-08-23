@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Process
+import android.os.SystemClock
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.lang.reflect.Method
@@ -21,9 +22,7 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
     @Volatile private var registeredUnregisterMethod: Method? = null
 
     constructor()
-    constructor(context: Context) {
-        serviceContext = context
-    }
+    constructor(context: Context) { serviceContext = context }
 
     override fun getBackendUid(): Int = Process.myUid()
     override fun isRunning(): Boolean = running.get()
@@ -48,6 +47,7 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
     }
 
     private fun runScan(seconds: Int) {
+        val deadlineMs = SystemClock.elapsedRealtime() + seconds * 1000L
         try {
             append("=== ID BE TOCH / SHOULDER R DIAGNOSTIC ===")
             append("backendUid=${Process.myUid()}")
@@ -84,13 +84,16 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
             ), 8))
             append("")
 
-            append("=== LIVE PHYSICAL R EVENTS ($seconds s) ===")
+            val remainingMs = (deadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L)
+            append("=== LIVE PHYSICAL R EVENTS (${remainingMs}ms remaining) ===")
             append("Press and release R several times now.")
             if (rNode == null) {
                 append("Cannot start live getevent: R node was not discovered.")
-                Thread.sleep(seconds * 1000L)
+                if (remainingMs > 0) Thread.sleep(remainingMs)
+            } else if (remainingMs > 0) {
+                captureGetevent(rNode, remainingMs)
             } else {
-                captureGetevent(rNode, seconds)
+                append("No live window remained after static diagnostics.")
             }
 
             unregisterGameKeyListener()
@@ -99,6 +102,7 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
         } catch (t: Throwable) {
             append("FATAL ${t.javaClass.simpleName}: ${t.message ?: ""}")
         } finally {
+            unregisterGameKeyListener()
             running.set(false)
         }
     }
@@ -225,7 +229,7 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
         }
     }
 
-    private fun captureGetevent(node: String, seconds: Int) {
+    private fun captureGetevent(node: String, durationMs: Long) {
         try {
             val p = ProcessBuilder("/system/bin/getevent", "-lt", node)
                 .redirectErrorStream(true)
@@ -237,11 +241,11 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
                 }
             }, "id-be-toch-getevent-reader").apply { start() }
 
-            Thread.sleep(seconds * 1000L)
+            Thread.sleep(durationMs)
             p.destroy()
             runCatching { p.waitFor() }
             if (p.isAlive) p.destroyForcibly()
-            readerThread.join(1500)
+            readerThread.join(1200)
             append("GETEVENT_EXIT=${runCatching { p.exitValue() }.getOrDefault(-999)}")
         } catch (t: Throwable) {
             append("getevent capture failed ${t.javaClass.simpleName}: ${t.message ?: ""}")
@@ -313,9 +317,7 @@ class ShoulderDiagUserService : IShoulderDiagService.Stub {
         else -> null
     }
 
-    private fun appendBlock(text: String) {
-        text.lineSequence().forEach { append(it) }
-    }
+    private fun appendBlock(text: String) { text.lineSequence().forEach { append(it) } }
 
     private fun append(line: String) {
         synchronized(lock) { out.append(line).append('\n') }

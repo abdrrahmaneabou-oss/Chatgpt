@@ -141,7 +141,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(6), dp(4), dp(10), dp(12))
         }
-        leftScroll.addView(left, ScrollView.LayoutParams(ScrollView.LayoutParams.MATCH_PARENT, ScrollView.LayoutParams.WRAP_CONTENT))
+        leftScroll.addView(left)
 
         left.addView(TextView(this).apply {
             text = "NUBIA INPUT LAB"

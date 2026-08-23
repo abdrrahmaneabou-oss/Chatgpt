@@ -47,12 +47,16 @@ class MainActivity : AppCompatActivity() {
     private var scanStartedAt = 0L
     private var uiState = UiState.READY
 
+    private fun uiReady(): Boolean = ::shizukuCard.isInitialized && ::statusCard.isInitialized
+
     private val binderReceivedListener = Shizuku.OnBinderReceivedListener {
+        if (!uiReady()) return@OnBinderReceivedListener
         refreshShizukuState(fromBinderCallback = true)
     }
 
     private val binderDeadListener = Shizuku.OnBinderDeadListener {
         remote = null
+        if (!uiReady()) return@OnBinderDeadListener
         showShizukuDisconnected("انقطع اتصال Shizuku. شغّله من تطبيق Shizuku ثم عد إلى هنا.")
         if (uiState == UiState.SCANNING) {
             pendingStart = false
@@ -61,7 +65,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private val permissionListener = Shizuku.OnRequestPermissionResultListener { requestCode, grantResult ->
-        if (requestCode != REQ_SHIZUKU) return@OnRequestPermissionResultListener
+        if (requestCode != REQ_SHIZUKU || !uiReady()) return@OnRequestPermissionResultListener
         if (grantResult == PackageManager.PERMISSION_GRANTED) {
             showShizukuConnecting("تم منح الإذن. جاري ربط خدمة الفحص بـ Shizuku…")
             bindDiagnosticService()
@@ -75,6 +79,7 @@ class MainActivity : AppCompatActivity() {
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             remote = IShoulderDiagService.Stub.asInterface(service)
+            if (!uiReady()) return
             userRequestedConnect = false
             showShizukuConnected()
             if (pendingStart) beginRemoteScan()
@@ -85,6 +90,7 @@ class MainActivity : AppCompatActivity() {
 
         override fun onServiceDisconnected(name: ComponentName?) {
             remote = null
+            if (!uiReady()) return
             showShizukuDisconnected("انقطع اتصال خدمة الفحص بـ Shizuku. اضغط البطاقة لإعادة الربط.")
             if (uiState == UiState.SCANNING) {
                 pendingStart = false
@@ -105,17 +111,23 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
-        Shizuku.addBinderDeadListener(binderDeadListener)
-        Shizuku.addRequestPermissionResultListener(permissionListener)
+
+        // Build the UI first. addBinderReceivedListenerSticky may invoke immediately
+        // when Shizuku is already running, so registering it before these lateinit
+        // views exist causes an instant startup crash.
         setContentView(buildUi())
         showReady("الفحص يعمل لمدة 30 ثانية. أبقِ الهاتف أفقيًا واستخدم زر R أثناء الفحص.")
+
+        Shizuku.addBinderDeadListener(binderDeadListener)
+        Shizuku.addRequestPermissionResultListener(permissionListener)
+        Shizuku.addBinderReceivedListenerSticky(binderReceivedListener)
+
         refreshShizukuState(fromBinderCallback = false)
     }
 
     override fun onResume() {
         super.onResume()
-        refreshShizukuState(fromBinderCallback = false)
+        if (uiReady()) refreshShizukuState(fromBinderCallback = false)
     }
 
     override fun onDestroy() {
@@ -305,6 +317,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refreshShizukuState(fromBinderCallback: Boolean, forcePermissionPrompt: Boolean = false) {
+        if (!uiReady()) return
         val alive = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
         if (!alive) {
             showShizukuDisconnected(

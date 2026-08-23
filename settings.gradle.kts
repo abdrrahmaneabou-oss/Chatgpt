@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "PixelTrigger"
 include(":app")
+include(":shoulderdiag")
